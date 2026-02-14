@@ -1,0 +1,505 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+judo installs a self-contained application distributed as a tar archive by extracting it, heuristically selecting the most likely main executable, copying the application files into /opt/<AppName>, creating a per-user desktop launcher in ~/.local/share/applications, and creating a per-user command symlink in ~/.local/bin (lowercased). It is safe to re-run: each run clears the temporary extraction directory, stages the install under /opt, and replaces any existing /opt/<AppName> with a timestamped backup.
+
+Usage:
+  judo [--force] <AppName> <tar-file>
+
+Arguments:
+  <AppName>   Logical application name used for naming paths and selecting an executable.
+  <tar-file>  Archive to install (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz)
+
+What it creates (derived from <AppName>):
+  Install directory:
+    /opt/<AppName>
+
+  Temporary extraction directory:
+    /tmp/<AppName>-extract
+
+  Desktop launcher (per-user, lowercased filename):
+    ~/.local/share/applications/<appname>.desktop
+
+  Symlink command (per-user, lowercased name):
+    ~/.local/bin/<appname>
+
+Executable selection:
+  The script scans the extracted files for executables and picks the best candidate using
+  name-based heuristics (prefers exact filename matches to <AppName> and case variants,
+  then files whose names contain <AppName>; prefers non-hidden paths and bin/ or app/
+  directories; de-prioritizes common helper/debug/test/daemon executables).
+
+Install modes (copy source selection):
+  Mode A (nested layout detected):
+    If the chosen executable resides inside a subdirectory under the extracted tree,
+    the script copies that executable's directory contents into /opt/<AppName>.
+
+  Mode B (flat/root layout):
+    Otherwise, the script copies the entire extracted tree into /opt/<AppName>.
+
+Desktop file behavior:
+  If a vendor *.desktop file is found inside the archive, judo will reuse it but overwrite:
+    Version, Name, Exec, Icon, Terminal, Type, Categories
+  All other vendor keys (e.g. StartupWMClass, MimeType, Actions) are preserved.
+  If no vendor desktop file is found, judo generates a minimal desktop file.
+
+Re-run behavior:
+  Safe to run multiple times. Each run:
+    - clears the temp extraction directory
+    - stages install under /opt and atomically replaces /opt/<AppName>
+    - moves any previous /opt/<AppName> to /opt/.<AppName>.backup.<timestamp>
+
+Notes:
+  - The symlink and desktop file names are derived from <AppName> but are lowercased.
+  - Ensure ~/.local/bin is on your PATH to run <appname> from the terminal.
+  - If generated names already exist in /opt, ~/.local/share/applications, or ~/.local/bin,
+    judo asks whether to use a new name, force replacement, or cancel.
+EOF
+}
+
+FORCE=0
+while (( $# > 0 )); do
+  case "$1" in
+    --force)
+      FORCE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Unknown option: $1"
+      usage
+      exit 1
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if (( $# != 2 )); then
+  usage
+  exit 1
+fi
+
+APP_NAME="$1"
+ARCHIVE="$2"
+
+USER_NAME="$(logname)"
+USER_HOME="$(eval echo "~${USER_NAME}")"
+LOCAL_BIN_DIR="${USER_HOME}/.local/bin"
+
+refresh_name_paths() {
+  INSTALL_DIR="/opt/${APP_NAME}"
+  DESKTOP_FILE="${USER_HOME}/.local/share/applications/${APP_NAME,,}.desktop"
+  TEMP_DIR="/tmp/${APP_NAME}-extract"
+  STAGE_DIR="/opt/.${APP_NAME}.staging.$$"
+  BACKUP_DIR="/opt/.${APP_NAME}.backup.$(date +%Y%m%d-%H%M%S)"
+  SYMLINK_PATH="${LOCAL_BIN_DIR}/${APP_NAME,,}"
+}
+
+TMP_DESKTOP="$(mktemp)"
+
+cleanup() {
+  rm -rf "$TEMP_DIR" "/tmp/${APP_NAME}-best-exec" 2>/dev/null || true
+  rm -f "$TMP_DESKTOP" 2>/dev/null || true
+  sudo rm -rf "$STAGE_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+find_name_conflicts() {
+  NAME_CONFLICTS=()
+
+  if [[ -e "$INSTALL_DIR" ]]; then
+    NAME_CONFLICTS+=("Install path exists: $INSTALL_DIR")
+  fi
+  if [[ -e "$DESKTOP_FILE" ]]; then
+    NAME_CONFLICTS+=("Desktop file exists: $DESKTOP_FILE")
+  fi
+  if [[ -e "$SYMLINK_PATH" ]]; then
+    if [[ -L "$SYMLINK_PATH" ]]; then
+      NAME_CONFLICTS+=("Local bin symlink exists: $SYMLINK_PATH")
+    else
+      NAME_CONFLICTS+=("Local bin entry exists and is not a symlink: $SYMLINK_PATH")
+    fi
+  fi
+}
+
+validate_app_name() {
+  local candidate="$1"
+  [[ -n "$candidate" ]] || return 1
+  [[ "$candidate" != */* ]] || return 1
+  [[ "$candidate" != "." && "$candidate" != ".." ]] || return 1
+}
+
+resolve_name_conflicts() {
+  while true; do
+    find_name_conflicts
+    if (( ${#NAME_CONFLICTS[@]} == 0 )); then
+      return
+    fi
+
+    if (( FORCE == 1 )); then
+      echo "Force enabled; proceeding despite name conflicts:"
+      printf '  - %s\n' "${NAME_CONFLICTS[@]}"
+      return
+    fi
+
+    if [[ ! -t 0 ]]; then
+      echo "Name conflicts detected for '$APP_NAME':"
+      printf '  - %s\n' "${NAME_CONFLICTS[@]}"
+      echo "Re-run with --force to replace these targets, or choose a different AppName."
+      exit 1
+    fi
+
+    echo "Name conflicts detected for '$APP_NAME':"
+    printf '  - %s\n' "${NAME_CONFLICTS[@]}"
+    echo "Choose action: [n]ew name, [f]orce, [c]ancel"
+
+    while true; do
+      read -r -p "> " choice
+      case "${choice,,}" in
+        n|new)
+          while true; do
+            read -r -p "Enter new AppName: " new_name
+            if ! validate_app_name "$new_name"; then
+              echo "Invalid name. Use a non-empty name without '/'."
+              continue
+            fi
+            APP_NAME="$new_name"
+            refresh_name_paths
+            break
+          done
+          break
+          ;;
+        f|force)
+          FORCE=1
+          echo "Proceeding with force for '$APP_NAME'."
+          return
+          ;;
+        c|cancel)
+          echo "Cancelled."
+          exit 1
+          ;;
+        *)
+          echo "Please type n, f, or c."
+          ;;
+      esac
+    done
+  done
+}
+
+pick_best_desktop_file() {
+  # Picks the best vendor desktop file from within a tree, printing its full path or nothing.
+  local root="$1"
+  local app_lc="${APP_NAME,,}"
+  local best_score=-999999
+  local best_file=""
+
+  while IFS= read -r -d '' f; do
+    local score=0
+    local base
+    base="$(basename "$f")"
+    local base_lc="${base,,}"
+
+    # Filename matches
+    [[ "$base_lc" == "${app_lc}.desktop" ]] && score=$((score + 200))
+    [[ "$base_lc" == *"$app_lc"* ]] && score=$((score + 80))
+
+    # Prefer canonical locations
+    [[ "$f" == */share/applications/* ]] && score=$((score + 60))
+    [[ "$f" == */applications/* ]] && score=$((score + 30))
+
+    # Name matches
+    local name
+    name="$(grep -m1 '^Name=' "$f" 2>/dev/null | cut -d= -f2- || true)"
+    local name_lc="${name,,}"
+    [[ -n "$name_lc" && "$name_lc" == "$app_lc" ]] && score=$((score + 140))
+    [[ -n "$name_lc" && "$name_lc" == *"$app_lc"* ]] && score=$((score + 70))
+
+    # Exec hints
+    local ex
+    ex="$(grep -m1 '^Exec=' "$f" 2>/dev/null | cut -d= -f2- || true)"
+    local ex_lc="${ex,,}"
+    [[ -n "$ex_lc" && "$ex_lc" == *"$app_lc"* ]] && score=$((score + 40))
+
+    # Basic sanity: must have a Desktop Entry header somewhere
+    if ! grep -q '^\[Desktop Entry\]' "$f" 2>/dev/null; then
+      score=$((score - 200))
+    fi
+
+    if (( score > best_score )); then
+      best_score="$score"
+      best_file="$f"
+    fi
+  done < <(find "$root" -type f -name "*.desktop" -print0 2>/dev/null)
+
+  # Require a minimally positive score to avoid random .desktop matches
+  if [[ -n "$best_file" && "$best_score" -ge 50 ]]; then
+    printf '%s\n' "$best_file"
+  fi
+}
+
+write_desktop_from_vendor() {
+  # Writes a desktop file based on vendor file, but overwrites the keys judo manages.
+  local vendor="$1"
+  local out="$2"
+  local name="$3"
+  local exec_line="$4"      # full Exec value (no "Exec=" prefix)
+  local icon_entry="$5"     # full "Icon=..." line
+  local categories="$6"
+
+  # If vendor doesn't contain [Desktop Entry], fail so caller can fallback.
+  if ! grep -q '^\[Desktop Entry\]' "$vendor" 2>/dev/null; then
+    return 1
+  fi
+
+  awk -v name="$name" \
+      -v exec_line="$exec_line" \
+      -v icon_entry="$icon_entry" \
+      -v categories="$categories" '
+    BEGIN { in_de=0; injected=0 }
+    /^\[Desktop Entry\]$/ {
+      print
+      print "Version=1.0"
+      print "Name=" name
+      print "Exec=" exec_line
+      print icon_entry
+      print "Terminal=false"
+      print "Type=Application"
+      print "Categories=" categories
+      in_de=1
+      injected=1
+      next
+    }
+    {
+      if (in_de==1) {
+        if ($0 ~ /^\[/) { in_de=0 }  # leaving group
+        else if ($0 ~ /^(Version|Name|Exec|Icon|Terminal|Type|Categories)=/) { next }
+      }
+      print
+    }
+    END {
+      if (injected==0) { exit 2 }
+    }
+ ' "$vendor" > "$out"
+}
+
+refresh_name_paths
+resolve_name_conflicts
+
+echo "Preparing temporary extraction dir..."
+rm -rf "$TEMP_DIR"
+mkdir -p "$TEMP_DIR"
+
+echo "Extracting $ARCHIVE..."
+case "$ARCHIVE" in
+  *.tar.gz|*.tgz) tar -xzf "$ARCHIVE" -C "$TEMP_DIR" ;;
+  *.tar.bz2|*.tbz2) tar -xjf "$ARCHIVE" -C "$TEMP_DIR" ;;
+  *.tar.xz|*.txz) tar -xJf "$ARCHIVE" -C "$TEMP_DIR" ;;
+  *.tar) tar -xf "$ARCHIVE" -C "$TEMP_DIR" ;;
+  *) echo "Unsupported format"; exit 1 ;;
+esac
+
+echo "Looking for executable..."
+# Score executables robustly (avoid command-substitution warnings from null bytes)
+best_score=-999999
+best_exec=""
+
+while IFS= read -r -d '' exec; do
+  filename="$(basename "$exec")"
+  score=0
+
+  [[ "$filename" == "$APP_NAME" ]] && score=$((score + 100))
+  [[ "$filename" == "${APP_NAME,,}" ]] && score=$((score + 90))
+  [[ "$filename" == "${APP_NAME^}" ]] && score=$((score + 90))
+
+  [[ "$filename" == *"$APP_NAME"* ]] && score=$((score + 50))
+  [[ "$filename" == *"${APP_NAME,,}"* ]] && score=$((score + 40))
+
+  [[ "$exec" != *"/."* ]] && score=$((score + 10))
+  [[ "$exec" == */bin/* ]] && score=$((score + 20))
+  [[ "$exec" == */app/* ]] && score=$((score + 20))
+
+  [[ "$filename" == *"test"* ]] && score=$((score - 30))
+  [[ "$filename" == *"debug"* ]] && score=$((score - 30))
+  [[ "$filename" == *"helper"* ]] && score=$((score - 20))
+  [[ "$filename" == *"daemon"* ]] && score=$((score - 20))
+
+  if (( score > best_score )); then
+    best_score="$score"
+    best_exec="$exec"
+  fi
+done < <(find "$TEMP_DIR" -type f -executable -print0)
+
+EXECUTABLE="${best_exec:-}"
+[[ -z "$EXECUTABLE" ]] && echo "No executable found" && exit 1
+echo "Found executable: $EXECUTABLE"
+
+echo "Finding icon..."
+ICON="$(find "$TEMP_DIR" -type f \( -name "*.png" -o -name "*.svg" -o -name "*.xpm" \) | head -1 || true)"
+echo "Found icon: ${ICON:-<none>}"
+
+echo "Staging install in: $STAGE_DIR"
+sudo rm -rf "$STAGE_DIR"
+sudo mkdir -p "$STAGE_DIR"
+
+# Decide what to copy into staging
+if [[ "$EXECUTABLE" == "$TEMP_DIR"/*/* ]]; then
+  SUBDIR="$(dirname "$EXECUTABLE")"
+  echo "Detected nested layout; staging from: $SUBDIR"
+  sudo cp -a "$SUBDIR"/. "$STAGE_DIR"/
+
+  if [[ -n "${ICON:-}" && "$ICON" != "$SUBDIR"/* ]]; then
+    sudo cp -a "$ICON" "$STAGE_DIR"/
+    ICON="$STAGE_DIR/$(basename "$ICON")"
+  fi
+else
+  echo "Staging from extracted root."
+  sudo cp -a "$TEMP_DIR"/. "$STAGE_DIR"/
+fi
+
+# Find final executable path inside staging
+FINAL_EXECUTABLE="$(
+  best_score=-999999
+  best_exec=""
+  while IFS= read -r -d '' exec; do
+    filename="$(basename "$exec")"
+    score=0
+    [[ "$filename" == "$APP_NAME" ]] && score=$((score + 100))
+    [[ "$filename" == "${APP_NAME,,}" ]] && score=$((score + 90))
+    [[ "$filename" == *"$APP_NAME"* ]] && score=$((score + 50))
+    if (( score > best_score )); then
+      best_score="$score"
+      best_exec="$exec"
+    fi
+  done < <(find "$STAGE_DIR" -type f -executable -print0)
+  printf '%s' "$best_exec"
+)"
+[[ -z "${FINAL_EXECUTABLE:-}" ]] && echo "No executable found after staging" && exit 1
+sudo chmod +x "$FINAL_EXECUTABLE"
+echo "Staged executable: $FINAL_EXECUTABLE"
+
+# If icon not found yet, look in staging
+if [[ -z "${ICON:-}" ]]; then
+  ICON="$(find "$STAGE_DIR" -type f \( -name "*.png" -o -name "*.svg" -o -name "*.xpm" \) | head -1 || true)"
+fi
+
+# Prepare icon entry (and install to pixmaps best-effort)
+if [[ -n "${ICON:-}" ]]; then
+  ICON_NAME="$(basename "$ICON")"
+  sudo cp "$ICON" "/usr/share/pixmaps/$ICON_NAME" 2>/dev/null || true
+  ICON_ENTRY="Icon=$ICON_NAME"
+else
+  ICON_ENTRY="Icon=$APP_NAME"
+fi
+
+# Pick vendor desktop file (from staging), keep relative path for after /opt move
+VENDOR_DESKTOP_STAGE="$(pick_best_desktop_file "$STAGE_DIR" || true)"
+VENDOR_DESKTOP_REL=""
+if [[ -n "${VENDOR_DESKTOP_STAGE:-}" ]]; then
+  VENDOR_DESKTOP_REL="${VENDOR_DESKTOP_STAGE#"$STAGE_DIR"/}"
+  echo "Found vendor desktop file: $VENDOR_DESKTOP_REL"
+else
+  echo "No vendor desktop file found; will generate one."
+fi
+
+echo "Replacing install directory under /opt..."
+if sudo test -e "$INSTALL_DIR"; then
+  echo "Existing install found; backing up to: $BACKUP_DIR"
+  sudo rm -rf "$BACKUP_DIR"
+  sudo mv "$INSTALL_DIR" "$BACKUP_DIR"
+fi
+sudo mv "$STAGE_DIR" "$INSTALL_DIR"
+
+# Re-select executable inside final install dir
+FINAL_EXECUTABLE_FINAL="$(
+  best_score=-999999
+  best_exec=""
+  while IFS= read -r -d '' exec; do
+    filename="$(basename "$exec")"
+    score=0
+    [[ "$filename" == "$APP_NAME" ]] && score=$((score + 100))
+    [[ "$filename" == "${APP_NAME,,}" ]] && score=$((score + 90))
+    [[ "$filename" == *"$APP_NAME"* ]] && score=$((score + 50))
+    if (( score > best_score )); then
+      best_score="$score"
+      best_exec="$exec"
+    fi
+  done < <(find "$INSTALL_DIR" -type f -executable -print0)
+  printf '%s' "$best_exec"
+)"
+[[ -z "${FINAL_EXECUTABLE_FINAL:-}" ]] && echo "No executable found after final install" && exit 1
+
+echo "Creating desktop file..."
+sudo -u "$USER_NAME" mkdir -p "$(dirname "$DESKTOP_FILE")"
+
+DESKTOP_CATEGORIES="Network;"
+
+if [[ -n "${VENDOR_DESKTOP_REL:-}" && -f "$INSTALL_DIR/$VENDOR_DESKTOP_REL" ]]; then
+  VENDOR_DESKTOP_FINAL="$INSTALL_DIR/$VENDOR_DESKTOP_REL"
+
+  # Preserve vendor Exec arguments/field-codes by keeping the suffix after the first token.
+  vendor_exec_raw="$(grep -m1 '^Exec=' "$VENDOR_DESKTOP_FINAL" 2>/dev/null | cut -d= -f2- || true)"
+  suffix=""
+  if [[ "$vendor_exec_raw" =~ ^\"[^\"]+\"[[:space:]]+(.*)$ ]]; then
+    suffix="${BASH_REMATCH[1]}"
+  elif [[ "$vendor_exec_raw" == *" "* ]]; then
+    suffix="${vendor_exec_raw#* }"
+  fi
+
+  EXEC_LINE="$FINAL_EXECUTABLE_FINAL"
+  [[ -n "$suffix" ]] && EXEC_LINE="$EXEC_LINE $suffix"
+
+  # If we didn't find an icon ourselves, prefer vendor Icon= over the fallback.
+  vendor_icon_line="$(grep -m1 '^Icon=' "$VENDOR_DESKTOP_FINAL" 2>/dev/null || true)"
+  if [[ "$ICON_ENTRY" == "Icon=$APP_NAME" && -n "$vendor_icon_line" ]]; then
+    ICON_ENTRY="$vendor_icon_line"
+  fi
+
+  if write_desktop_from_vendor "$VENDOR_DESKTOP_FINAL" "$TMP_DESKTOP" "$APP_NAME" "$EXEC_LINE" "$ICON_ENTRY" "$DESKTOP_CATEGORIES"; then
+    sudo -u "$USER_NAME" install -m 644 "$TMP_DESKTOP" "$DESKTOP_FILE"
+  else
+    echo "Vendor desktop file unusable; falling back to generated desktop file."
+    sudo -u "$USER_NAME" cat > "$DESKTOP_FILE" << EOF
+[Desktop Entry]
+Version=1.0
+Name=$APP_NAME
+Exec=$FINAL_EXECUTABLE_FINAL
+$ICON_ENTRY
+Terminal=false
+Type=Application
+Categories=$DESKTOP_CATEGORIES
+EOF
+  fi
+else
+  sudo -u "$USER_NAME" cat > "$DESKTOP_FILE" << EOF
+[Desktop Entry]
+Version=1.0
+Name=$APP_NAME
+Exec=$FINAL_EXECUTABLE_FINAL
+$ICON_ENTRY
+Terminal=false
+Type=Application
+Categories=$DESKTOP_CATEGORIES
+EOF
+fi
+
+echo "Creating symlink in ~/.local/bin..."
+sudo -u "$USER_NAME" mkdir -p "$LOCAL_BIN_DIR"
+sudo -u "$USER_NAME" ln -sf "$FINAL_EXECUTABLE_FINAL" "$SYMLINK_PATH"
+
+echo "=== INSTALLATION COMPLETE ==="
+echo "Application: $FINAL_EXECUTABLE_FINAL"
+echo "Desktop file: $DESKTOP_FILE"
+echo "Symlink: $SYMLINK_PATH"
+echo "Backup (if any): $BACKUP_DIR"
+echo "Test command: ${APP_NAME,,}"	
