@@ -6,11 +6,13 @@ usage() {
 judo installs a self-contained application distributed as a tar archive by extracting it, heuristically selecting the most likely main executable, copying the application files into /opt/<AppName>, creating a per-user desktop launcher in ~/.local/share/applications, and creating a per-user command symlink in ~/.local/bin (lowercased). It is safe to re-run: each run clears the temporary extraction directory, stages the install under /opt, and replaces any existing /opt/<AppName> with a timestamped backup.
 
 Usage:
-  judo [--force] <AppName> <tar-file>
+  judo [--force] <AppName> <tar-file-or-url>
 
 Arguments:
   <AppName>   Logical application name used for naming paths and selecting an executable.
-  <tar-file>  Archive to install (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz)
+  <tar-file-or-url>
+              Archive path or http(s) URL to install
+              (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz)
 
 What it creates (derived from <AppName>):
   Install directory:
@@ -56,6 +58,7 @@ Notes:
   - Ensure ~/.local/bin is on your PATH to run <appname> from the terminal.
   - If generated names already exist in /opt, ~/.local/share/applications, or ~/.local/bin,
     judo asks whether to use a new name, force replacement, or cancel.
+  - If <tar-file-or-url> starts with http:// or https://, judo downloads it using curl -L first.
 EOF
 }
 
@@ -91,7 +94,9 @@ if (( $# != 2 )); then
 fi
 
 APP_NAME="$1"
-ARCHIVE="$2"
+ARCHIVE_INPUT="$2"
+ARCHIVE="$ARCHIVE_INPUT"
+DOWNLOADED_ARCHIVE=""
 
 USER_NAME="$(logname)"
 USER_HOME="$(eval echo "~${USER_NAME}")"
@@ -111,6 +116,7 @@ TMP_DESKTOP="$(mktemp)"
 cleanup() {
   rm -rf "$TEMP_DIR" "/tmp/${APP_NAME}-best-exec" 2>/dev/null || true
   rm -f "$TMP_DESKTOP" 2>/dev/null || true
+  rm -f "$DOWNLOADED_ARCHIVE" 2>/dev/null || true
   sudo rm -rf "$STAGE_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -138,6 +144,44 @@ validate_app_name() {
   [[ -n "$candidate" ]] || return 1
   [[ "$candidate" != */* ]] || return 1
   [[ "$candidate" != "." && "$candidate" != ".." ]] || return 1
+}
+
+is_http_archive_url() {
+  [[ "$1" =~ ^https?:// ]]
+}
+
+download_archive_if_url() {
+  local input="$1"
+  local suffix=".tar"
+  local no_fragment
+  local no_query
+  local input_lc
+
+  if ! is_http_archive_url "$input"; then
+    return
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required to download URL archives."
+    exit 1
+  fi
+
+  no_fragment="${input%%#*}"
+  no_query="${no_fragment%%\?*}"
+  input_lc="${no_query,,}"
+
+  case "$input_lc" in
+    *.tar.gz|*.tgz) suffix=".tar.gz" ;;
+    *.tar.bz2|*.tbz2) suffix=".tar.bz2" ;;
+    *.tar.xz|*.txz) suffix=".tar.xz" ;;
+    *.tar) suffix=".tar" ;;
+  esac
+
+  DOWNLOADED_ARCHIVE="$(mktemp "/tmp/judo-download.XXXXXX${suffix}")"
+  echo "Downloading archive from URL: $input"
+  curl -fL "$input" -o "$DOWNLOADED_ARCHIVE"
+  ARCHIVE="$DOWNLOADED_ARCHIVE"
+  echo "Downloaded archive: $ARCHIVE"
 }
 
 resolve_name_conflicts() {
@@ -295,6 +339,7 @@ write_desktop_from_vendor() {
 
 refresh_name_paths
 resolve_name_conflicts
+download_archive_if_url "$ARCHIVE_INPUT"
 
 echo "Preparing temporary extraction dir..."
 rm -rf "$TEMP_DIR"

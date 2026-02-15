@@ -9,7 +9,7 @@ It extracts the archive, picks the most likely main executable, installs the app
 Given:
 
 ```bash
-judo [--force] <AppName> <tar-file>
+judo [--force] <AppName> <tar-file-or-url>
 ```
 
 it will:
@@ -39,6 +39,8 @@ Recommended:
 - `.tar.bz2` / `.tbz2`
 - `.tar.xz` / `.txz`
 
+You can pass either a local archive path or an `http://` / `https://` URL. URL inputs are downloaded first via `curl -L`, then installed.
+
 ## Installation
 
 Clone/download this repository, then make script executable:
@@ -56,7 +58,7 @@ sudo install -m 755 ./judo /usr/local/bin/judo
 ## Usage
 
 ```bash
-judo [--force] <AppName> <tar-file>
+judo [--force] <AppName> <tar-file-or-url>
 ```
 
 Examples:
