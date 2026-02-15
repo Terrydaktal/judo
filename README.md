@@ -79,7 +79,7 @@ Before extraction, `judo` checks for existing generated targets:
 
 If conflicts exist:
 
-- Interactive TTY: prompts for `new name`, `force`, or `cancel`
+- Interactive TTY: prompts for `yes` (overwrite), `new name`, or `cancel`
 - Non-interactive: exits with error and asks you to rerun with `--force` or a different app name
 - `--force`: proceeds and replaces conflicting targets
 

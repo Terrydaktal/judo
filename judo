@@ -57,7 +57,7 @@ Notes:
   - The symlink and desktop file names are derived from <AppName> but are lowercased.
   - Ensure ~/.local/bin is on your PATH to run <appname> from the terminal.
   - If generated names already exist in /opt, ~/.local/share/applications, or ~/.local/bin,
-    judo asks whether to use a new name, force replacement, or cancel.
+    judo asks whether to overwrite, use a new name, or cancel.
   - If <tar-file-or-url> starts with http:// or https://, judo downloads it using curl -L first.
 EOF
 }
@@ -184,6 +184,86 @@ download_archive_if_url() {
   echo "Downloaded archive: $ARCHIVE"
 }
 
+score_executable() {
+  local exec_path="$1"
+  local filename
+  local filename_lc
+  local app_lc
+  local score=0
+
+  filename="$(basename "$exec_path")"
+  filename_lc="${filename,,}"
+  app_lc="${APP_NAME,,}"
+
+  [[ "$filename_lc" == "$app_lc" ]] && score=$((score + 220))
+  [[ "$filename_lc" == "${app_lc}."* ]] && score=$((score + 90))
+  [[ "$filename_lc" == "${app_lc}-"* || "$filename_lc" == "${app_lc}_"* ]] && score=$((score + 70))
+  [[ "$filename_lc" == *"$app_lc"* ]] && score=$((score + 40))
+
+  [[ "$exec_path" != *"/."* ]] && score=$((score + 10))
+  [[ "$exec_path" == */bin/* ]] && score=$((score + 15))
+  [[ "$exec_path" == */app/* ]] && score=$((score + 15))
+  [[ "$exec_path" == */lib/* ]] && score=$((score - 25))
+
+  [[ "$filename_lc" == *"test"* ]] && score=$((score - 30))
+  [[ "$filename_lc" == *"debug"* ]] && score=$((score - 30))
+  [[ "$filename_lc" == *"helper"* ]] && score=$((score - 30))
+  [[ "$filename_lc" == *"daemon"* ]] && score=$((score - 30))
+
+  # Avoid launcher/wrapper helpers when a real app binary is present.
+  [[ "$filename_lc" == *.sh ]] && score=$((score - 80))
+  [[ "$filename_lc" == *"wrapper"* ]] && score=$((score - 80))
+  [[ "$filename_lc" == *"launcher"* ]] && score=$((score - 50))
+  [[ "$filename_lc" == *"exec-outside"* ]] && score=$((score - 250))
+  [[ "$filename_lc" == *"outside"*"env"* ]] && score=$((score - 200))
+
+  printf '%s\n' "$score"
+}
+
+pick_best_executable() {
+  local root="$1"
+  local best_score=-999999
+  local best_exec=""
+  local score=0
+
+  while IFS= read -r -d '' exec; do
+    score="$(score_executable "$exec")"
+    if (( score > best_score )); then
+      best_score="$score"
+      best_exec="$exec"
+    fi
+  done < <(find "$root" -type f -executable -print0)
+
+  printf '%s' "$best_exec"
+}
+
+determine_stage_source() {
+  local rel_path
+  local top_dir
+  local top_entries=()
+
+  shopt -s nullglob dotglob
+  top_entries=("$TEMP_DIR"/*)
+  shopt -u nullglob dotglob
+
+  if (( ${#top_entries[@]} == 1 )) && [[ -d "${top_entries[0]}" ]]; then
+    STAGE_SOURCE="${top_entries[0]}"
+    echo "Detected single top-level directory; staging from: $STAGE_SOURCE"
+    return
+  fi
+
+  rel_path="${EXECUTABLE#"$TEMP_DIR"/}"
+  top_dir="${rel_path%%/*}"
+  if [[ "$rel_path" != "$EXECUTABLE" && -n "$top_dir" && -d "$TEMP_DIR/$top_dir" ]]; then
+    STAGE_SOURCE="$TEMP_DIR/$top_dir"
+    echo "Detected grouped layout; staging from: $STAGE_SOURCE"
+    return
+  fi
+
+  STAGE_SOURCE="$TEMP_DIR"
+  echo "Staging from extracted root."
+}
+
 resolve_name_conflicts() {
   while true; do
     find_name_conflicts
@@ -206,11 +286,16 @@ resolve_name_conflicts() {
 
     echo "Name conflicts detected for '$APP_NAME':"
     printf '  - %s\n' "${NAME_CONFLICTS[@]}"
-    echo "Choose action: [n]ew name, [f]orce, [c]ancel"
+    echo "Overwrite existing targets? [y]es, [n]ew name, [c]ancel"
 
     while true; do
       read -r -p "> " choice
       case "${choice,,}" in
+        y|yes|f|force)
+          FORCE=1
+          echo "Proceeding with overwrite for '$APP_NAME'."
+          return
+          ;;
         n|new)
           while true; do
             read -r -p "Enter new AppName: " new_name
@@ -223,11 +308,6 @@ resolve_name_conflicts() {
             break
           done
           break
-          ;;
-        f|force)
-          FORCE=1
-          echo "Proceeding with force for '$APP_NAME'."
-          return
           ;;
         c|cancel)
           echo "Cancelled."
@@ -355,37 +435,7 @@ case "$ARCHIVE" in
 esac
 
 echo "Looking for executable..."
-# Score executables robustly (avoid command-substitution warnings from null bytes)
-best_score=-999999
-best_exec=""
-
-while IFS= read -r -d '' exec; do
-  filename="$(basename "$exec")"
-  score=0
-
-  [[ "$filename" == "$APP_NAME" ]] && score=$((score + 100))
-  [[ "$filename" == "${APP_NAME,,}" ]] && score=$((score + 90))
-  [[ "$filename" == "${APP_NAME^}" ]] && score=$((score + 90))
-
-  [[ "$filename" == *"$APP_NAME"* ]] && score=$((score + 50))
-  [[ "$filename" == *"${APP_NAME,,}"* ]] && score=$((score + 40))
-
-  [[ "$exec" != *"/."* ]] && score=$((score + 10))
-  [[ "$exec" == */bin/* ]] && score=$((score + 20))
-  [[ "$exec" == */app/* ]] && score=$((score + 20))
-
-  [[ "$filename" == *"test"* ]] && score=$((score - 30))
-  [[ "$filename" == *"debug"* ]] && score=$((score - 30))
-  [[ "$filename" == *"helper"* ]] && score=$((score - 20))
-  [[ "$filename" == *"daemon"* ]] && score=$((score - 20))
-
-  if (( score > best_score )); then
-    best_score="$score"
-    best_exec="$exec"
-  fi
-done < <(find "$TEMP_DIR" -type f -executable -print0)
-
-EXECUTABLE="${best_exec:-}"
+EXECUTABLE="$(pick_best_executable "$TEMP_DIR")"
 [[ -z "$EXECUTABLE" ]] && echo "No executable found" && exit 1
 echo "Found executable: $EXECUTABLE"
 
@@ -397,38 +447,16 @@ echo "Staging install in: $STAGE_DIR"
 sudo rm -rf "$STAGE_DIR"
 sudo mkdir -p "$STAGE_DIR"
 
-# Decide what to copy into staging
-if [[ "$EXECUTABLE" == "$TEMP_DIR"/*/* ]]; then
-  SUBDIR="$(dirname "$EXECUTABLE")"
-  echo "Detected nested layout; staging from: $SUBDIR"
-  sudo cp -a "$SUBDIR"/. "$STAGE_DIR"/
+determine_stage_source
+sudo cp -a "$STAGE_SOURCE"/. "$STAGE_DIR"/
 
-  if [[ -n "${ICON:-}" && "$ICON" != "$SUBDIR"/* ]]; then
-    sudo cp -a "$ICON" "$STAGE_DIR"/
-    ICON="$STAGE_DIR/$(basename "$ICON")"
-  fi
-else
-  echo "Staging from extracted root."
-  sudo cp -a "$TEMP_DIR"/. "$STAGE_DIR"/
+if [[ -n "${ICON:-}" && "$ICON" != "$STAGE_SOURCE"/* ]]; then
+  sudo cp -a "$ICON" "$STAGE_DIR"/
+  ICON="$STAGE_DIR/$(basename "$ICON")"
 fi
 
 # Find final executable path inside staging
-FINAL_EXECUTABLE="$(
-  best_score=-999999
-  best_exec=""
-  while IFS= read -r -d '' exec; do
-    filename="$(basename "$exec")"
-    score=0
-    [[ "$filename" == "$APP_NAME" ]] && score=$((score + 100))
-    [[ "$filename" == "${APP_NAME,,}" ]] && score=$((score + 90))
-    [[ "$filename" == *"$APP_NAME"* ]] && score=$((score + 50))
-    if (( score > best_score )); then
-      best_score="$score"
-      best_exec="$exec"
-    fi
-  done < <(find "$STAGE_DIR" -type f -executable -print0)
-  printf '%s' "$best_exec"
-)"
+FINAL_EXECUTABLE="$(pick_best_executable "$STAGE_DIR")"
 [[ -z "${FINAL_EXECUTABLE:-}" ]] && echo "No executable found after staging" && exit 1
 sudo chmod +x "$FINAL_EXECUTABLE"
 echo "Staged executable: $FINAL_EXECUTABLE"
@@ -466,22 +494,7 @@ fi
 sudo mv "$STAGE_DIR" "$INSTALL_DIR"
 
 # Re-select executable inside final install dir
-FINAL_EXECUTABLE_FINAL="$(
-  best_score=-999999
-  best_exec=""
-  while IFS= read -r -d '' exec; do
-    filename="$(basename "$exec")"
-    score=0
-    [[ "$filename" == "$APP_NAME" ]] && score=$((score + 100))
-    [[ "$filename" == "${APP_NAME,,}" ]] && score=$((score + 90))
-    [[ "$filename" == *"$APP_NAME"* ]] && score=$((score + 50))
-    if (( score > best_score )); then
-      best_score="$score"
-      best_exec="$exec"
-    fi
-  done < <(find "$INSTALL_DIR" -type f -executable -print0)
-  printf '%s' "$best_exec"
-)"
+FINAL_EXECUTABLE_FINAL="$(pick_best_executable "$INSTALL_DIR")"
 [[ -z "${FINAL_EXECUTABLE_FINAL:-}" ]] && echo "No executable found after final install" && exit 1
 
 echo "Creating desktop file..."
