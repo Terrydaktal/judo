@@ -14,12 +14,26 @@ judo [--force] <AppName> <tar-file-or-url>
 
 it will:
 
-1. Extract the archive to `/tmp/<AppName>-extract`.
-2. Score executable candidates and choose the best match for `<AppName>`.
-3. Stage files under `/opt/.<AppName>.staging.<pid>`.
-4. Replace `/opt/<AppName>` (backing up previous install to `/opt/.<AppName>.backup.<timestamp>` when present).
-5. Create/update `~/.local/share/applications/<appname>.desktop`.
-6. Create/update `~/.local/bin/<appname>` symlink.
+1. Resolve name conflicts for `/opt/<AppName>`, `~/.local/share/applications/<appname>.desktop`, and `~/.local/bin/<appname>` (overwrite, new name, or cancel).
+2. If input is an `http://` / `https://` URL, download it with `curl -L` first.
+3. Prepare a clean extraction directory at `/tmp/<AppName>-extract`.
+4. Extract the archive payload into that temp tree (tar/zip/package payload extraction depending on format).
+5. Score executable candidates and choose the best match for `<AppName>`.
+6. Find an icon candidate if one exists.
+7. Choose the staging source tree from extracted content.
+8. Stage files under `/opt/.<AppName>.staging.<pid>`.
+9. Re-score executable from staged content.
+10. Reuse or generate a desktop file and set managed keys (`Name`, `Exec`, `Icon`, etc.).
+11. Atomically replace `/opt/<AppName>` (backing up previous install to `/opt/.<AppName>.backup.<timestamp>` when present).
+12. Create/update `~/.local/share/applications/<appname>.desktop` and `~/.local/bin/<appname>`.
+
+Staging in `/opt/.<AppName>.staging.<pid>` is intentional:
+
+- It keeps staging on the same filesystem as `/opt/<AppName>`, so the final `mv` is an atomic rename instead of a cross-filesystem copy.
+- It reduces half-installed states if something fails before final replacement.
+- It is cleaned up automatically: on success it is renamed into place, and on failure/exit the cleanup trap removes the staging directory.
+
+`/tmp` is still used for extraction, but not for final staging/swap.
 
 ## Requirements
 
