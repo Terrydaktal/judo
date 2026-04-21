@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-judo installs a self-contained application distributed as a tar archive by extracting it, heuristically selecting the most likely main executable, copying the application files into /opt/<AppName>, creating a per-user desktop launcher in ~/.local/share/applications, and creating a per-user command symlink in ~/.local/bin (lowercased). It is safe to re-run: each run clears the temporary extraction directory, stages the install under /opt, and replaces any existing /opt/<AppName> with a timestamped backup.
+judo installs a self-contained application distributed as an archive by extracting it, heuristically selecting the most likely main executable, copying the application files into /opt/<AppName>, creating a per-user desktop launcher in ~/.local/share/applications, and creating a per-user command symlink in ~/.local/bin (lowercased). It is safe to re-run: each run clears the temporary extraction directory, stages the install under /opt, and replaces any existing /opt/<AppName> with a timestamped backup.
 
 Usage:
   judo [--force] <AppName> <tar-file-or-url>
@@ -12,7 +12,7 @@ Arguments:
   <AppName>   Logical application name used for naming paths and selecting an executable.
   <tar-file-or-url>
               Archive path or http(s) URL to install
-              (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz)
+              (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .deb)
 
 What it creates (derived from <AppName>):
   Install directory:
@@ -59,6 +59,7 @@ Notes:
   - If generated names already exist in /opt, ~/.local/share/applications, or ~/.local/bin,
     judo asks whether to overwrite, use a new name, or cancel.
   - If <tar-file-or-url> starts with http:// or https://, judo downloads it using curl -L first.
+  - For .deb input, judo extracts package payload only (data.tar.*), then installs from that tree.
 EOF
 }
 
@@ -97,6 +98,7 @@ APP_NAME="$1"
 ARCHIVE_INPUT="$2"
 ARCHIVE="$ARCHIVE_INPUT"
 DOWNLOADED_ARCHIVE=""
+DEB_WORK_DIR=""
 
 USER_NAME="$(logname)"
 USER_HOME="$(eval echo "~${USER_NAME}")"
@@ -115,6 +117,7 @@ TMP_DESKTOP="$(mktemp)"
 
 cleanup() {
   rm -rf "$TEMP_DIR" "/tmp/${APP_NAME}-best-exec" 2>/dev/null || true
+  rm -rf "$DEB_WORK_DIR" 2>/dev/null || true
   rm -f "$TMP_DESKTOP" 2>/dev/null || true
   rm -f "$DOWNLOADED_ARCHIVE" 2>/dev/null || true
   sudo rm -rf "$STAGE_DIR" 2>/dev/null || true
@@ -175,6 +178,7 @@ download_archive_if_url() {
     *.tar.bz2|*.tbz2) suffix=".tar.bz2" ;;
     *.tar.xz|*.txz) suffix=".tar.xz" ;;
     *.tar) suffix=".tar" ;;
+    *.deb) suffix=".deb" ;;
   esac
 
   DOWNLOADED_ARCHIVE="$(mktemp "/tmp/judo-download.XXXXXX${suffix}")"
@@ -182,6 +186,45 @@ download_archive_if_url() {
   curl -fL "$input" -o "$DOWNLOADED_ARCHIVE"
   ARCHIVE="$DOWNLOADED_ARCHIVE"
   echo "Downloaded archive: $ARCHIVE"
+}
+
+extract_deb_payload() {
+  local deb_path="$1"
+  local data_archive=""
+
+  if ! command -v ar >/dev/null 2>&1; then
+    echo "ar is required to extract .deb files."
+    exit 1
+  fi
+
+  DEB_WORK_DIR="$(mktemp -d "/tmp/judo-deb.XXXXXX")"
+  (
+    cd "$DEB_WORK_DIR"
+    ar x "$deb_path"
+  )
+
+  data_archive="$(find "$DEB_WORK_DIR" -maxdepth 1 -type f -name 'data.tar*' | head -1 || true)"
+  if [[ -z "$data_archive" ]]; then
+    echo "Unsupported .deb: payload archive data.tar.* not found"
+    exit 1
+  fi
+
+  echo "Extracting Debian payload: $(basename "$data_archive")"
+  tar -xf "$data_archive" -C "$TEMP_DIR"
+}
+
+extract_archive() {
+  local archive_path="$1"
+  local archive_lc="${archive_path,,}"
+
+  case "$archive_lc" in
+    *.tar.gz|*.tgz) tar -xzf "$archive_path" -C "$TEMP_DIR" ;;
+    *.tar.bz2|*.tbz2) tar -xjf "$archive_path" -C "$TEMP_DIR" ;;
+    *.tar.xz|*.txz) tar -xJf "$archive_path" -C "$TEMP_DIR" ;;
+    *.tar) tar -xf "$archive_path" -C "$TEMP_DIR" ;;
+    *.deb) extract_deb_payload "$archive_path" ;;
+    *) echo "Unsupported format"; exit 1 ;;
+  esac
 }
 
 score_executable() {
@@ -426,13 +469,7 @@ rm -rf "$TEMP_DIR"
 mkdir -p "$TEMP_DIR"
 
 echo "Extracting $ARCHIVE..."
-case "$ARCHIVE" in
-  *.tar.gz|*.tgz) tar -xzf "$ARCHIVE" -C "$TEMP_DIR" ;;
-  *.tar.bz2|*.tbz2) tar -xjf "$ARCHIVE" -C "$TEMP_DIR" ;;
-  *.tar.xz|*.txz) tar -xJf "$ARCHIVE" -C "$TEMP_DIR" ;;
-  *.tar) tar -xf "$ARCHIVE" -C "$TEMP_DIR" ;;
-  *) echo "Unsupported format"; exit 1 ;;
-esac
+extract_archive "$ARCHIVE"
 
 echo "Looking for executable..."
 EXECUTABLE="$(pick_best_executable "$TEMP_DIR")"

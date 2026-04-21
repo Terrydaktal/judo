@@ -1,6 +1,6 @@
 # judo
 
-`judo` installs self-contained Linux applications distributed as tar archives.
+`judo` installs self-contained Linux applications distributed as archives.
 
 It extracts the archive, picks the most likely main executable, installs the app under `/opt/<AppName>`, creates a user desktop launcher, and creates a user command symlink in `~/.local/bin`.
 
@@ -38,8 +38,11 @@ Recommended:
 - `.tar.gz` / `.tgz`
 - `.tar.bz2` / `.tbz2`
 - `.tar.xz` / `.txz`
+- `.deb` (payload extraction mode)
 
 You can pass either a local archive path or an `http://` / `https://` URL. URL inputs are downloaded first via `curl -L`, then installed.
+
+For `.deb` files, `judo` extracts `data.tar.*` and installs from that payload tree. It does not run Debian maintainer scripts or resolve package dependencies.
 
 ## Installation
 
@@ -66,6 +69,7 @@ Examples:
 ```bash
 judo Telegram ~/Downloads/Telegram.tar.xz
 judo Obsidian ~/Downloads/obsidian.tar.gz
+judo Slicer ~/Downloads/Slicer-linux-amd64.deb
 judo --force Telegram ~/Downloads/Telegram.tar.xz
 ```
 
