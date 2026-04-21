@@ -12,7 +12,8 @@ Arguments:
   <AppName>   Logical application name used for naming paths and selecting an executable.
   <tar-file-or-url>
               Archive path or http(s) URL to install
-              (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .deb)
+              (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .tar.zst/.tzst,
+               .pkg.tar.zst, .zip, .deb, .rpm)
 
 What it creates (derived from <AppName>):
   Install directory:
@@ -59,7 +60,7 @@ Notes:
   - If generated names already exist in /opt, ~/.local/share/applications, or ~/.local/bin,
     judo asks whether to overwrite, use a new name, or cancel.
   - If <tar-file-or-url> starts with http:// or https://, judo downloads it using curl -L first.
-  - For .deb input, judo extracts package payload only (data.tar.*), then installs from that tree.
+  - For .deb/.rpm input, judo extracts package payload only, then installs from that tree.
 EOF
 }
 
@@ -177,8 +178,12 @@ download_archive_if_url() {
     *.tar.gz|*.tgz) suffix=".tar.gz" ;;
     *.tar.bz2|*.tbz2) suffix=".tar.bz2" ;;
     *.tar.xz|*.txz) suffix=".tar.xz" ;;
+    *.tar.zst|*.tzst) suffix=".tar.zst" ;;
+    *.pkg.tar.zst) suffix=".pkg.tar.zst" ;;
     *.tar) suffix=".tar" ;;
+    *.zip) suffix=".zip" ;;
     *.deb) suffix=".deb" ;;
+    *.rpm) suffix=".rpm" ;;
   esac
 
   DOWNLOADED_ARCHIVE="$(mktemp "/tmp/judo-download.XXXXXX${suffix}")"
@@ -213,6 +218,57 @@ extract_deb_payload() {
   tar -xf "$data_archive" -C "$TEMP_DIR"
 }
 
+extract_zip_payload() {
+  local zip_path="$1"
+
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$zip_path" -d "$TEMP_DIR"
+    return
+  fi
+  if command -v bsdtar >/dev/null 2>&1; then
+    bsdtar -xf "$zip_path" -C "$TEMP_DIR"
+    return
+  fi
+
+  echo "zip extraction requires unzip or bsdtar."
+  exit 1
+}
+
+extract_tar_zst_payload() {
+  local archive_path="$1"
+
+  if tar --zstd -xf "$archive_path" -C "$TEMP_DIR" 2>/dev/null; then
+    return
+  fi
+  if command -v zstd >/dev/null 2>&1 && tar -I zstd -xf "$archive_path" -C "$TEMP_DIR" 2>/dev/null; then
+    return
+  fi
+
+  echo "Could not extract zstd tar archive; requires tar with zstd support (or zstd)."
+  exit 1
+}
+
+extract_rpm_payload() {
+  local rpm_path="$1"
+
+  if command -v bsdtar >/dev/null 2>&1; then
+    if bsdtar -xf "$rpm_path" -C "$TEMP_DIR"; then
+      return
+    fi
+  fi
+
+  if command -v rpm2cpio >/dev/null 2>&1 && command -v cpio >/dev/null 2>&1; then
+    (
+      cd "$TEMP_DIR"
+      rpm2cpio "$rpm_path" | cpio -idm --quiet
+    )
+    return
+  fi
+
+  echo "rpm extraction requires bsdtar or rpm2cpio+cpio."
+  exit 1
+}
+
 extract_archive() {
   local archive_path="$1"
   local archive_lc="${archive_path,,}"
@@ -221,8 +277,11 @@ extract_archive() {
     *.tar.gz|*.tgz) tar -xzf "$archive_path" -C "$TEMP_DIR" ;;
     *.tar.bz2|*.tbz2) tar -xjf "$archive_path" -C "$TEMP_DIR" ;;
     *.tar.xz|*.txz) tar -xJf "$archive_path" -C "$TEMP_DIR" ;;
+    *.pkg.tar.zst|*.tar.zst|*.tzst) extract_tar_zst_payload "$archive_path" ;;
     *.tar) tar -xf "$archive_path" -C "$TEMP_DIR" ;;
+    *.zip) extract_zip_payload "$archive_path" ;;
     *.deb) extract_deb_payload "$archive_path" ;;
+    *.rpm) extract_rpm_payload "$archive_path" ;;
     *) echo "Unsupported format"; exit 1 ;;
   esac
 }

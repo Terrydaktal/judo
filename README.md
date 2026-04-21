@@ -27,6 +27,10 @@ it will:
 - `sudo` privileges (writes under `/opt` and optionally `/usr/share/pixmaps`)
 - `tar`
 - `find`, `awk`, `grep`, `install`
+- `unzip` or `bsdtar` (for `.zip`)
+- `ar` (for `.deb`)
+- `bsdtar` or `rpm2cpio` + `cpio` (for `.rpm`)
+- `tar` with zstd support (for `.tar.zst` / `.tzst` / `.pkg.tar.zst`)
 
 Recommended:
 
@@ -38,11 +42,15 @@ Recommended:
 - `.tar.gz` / `.tgz`
 - `.tar.bz2` / `.tbz2`
 - `.tar.xz` / `.txz`
+- `.tar.zst` / `.tzst`
+- `.pkg.tar.zst`
+- `.zip`
 - `.deb` (payload extraction mode)
+- `.rpm` (payload extraction mode)
 
 You can pass either a local archive path or an `http://` / `https://` URL. URL inputs are downloaded first via `curl -L`, then installed.
 
-For `.deb` files, `judo` extracts `data.tar.*` and installs from that payload tree. It does not run Debian maintainer scripts or resolve package dependencies.
+For package files (`.deb`, `.rpm`), `judo` extracts payload contents and installs from that tree. It does not run package-manager maintainer scripts or resolve dependencies.
 
 ## Installation
 
@@ -69,7 +77,10 @@ Examples:
 ```bash
 judo Telegram ~/Downloads/Telegram.tar.xz
 judo Obsidian ~/Downloads/obsidian.tar.gz
+judo Krita ~/Downloads/krita-5.2.9-x86_64.appimage.zip
 judo Slicer ~/Downloads/Slicer-linux-amd64.deb
+judo Example ~/Downloads/example.tar.zst
+judo Example ~/Downloads/example.rpm
 judo --force Telegram ~/Downloads/Telegram.tar.xz
 ```
 
