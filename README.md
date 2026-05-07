@@ -9,7 +9,7 @@ It extracts the archive, picks the most likely main executable, installs the app
 Given:
 
 ```bash
-judo [--force] <AppName> <tar-file-or-url>
+judo [--force] <tar-file-or-url> <AppName>
 ```
 
 it will:
@@ -83,19 +83,19 @@ sudo install -m 755 ./judo /usr/local/bin/judo
 ## Usage
 
 ```bash
-judo [--force] <AppName> <tar-file-or-url>
+judo [--force] <tar-file-or-url> <AppName>
 ```
 
 Examples:
 
 ```bash
-judo Telegram ~/Downloads/Telegram.tar.xz
-judo Obsidian ~/Downloads/obsidian.tar.gz
-judo Krita ~/Downloads/krita-5.2.9-x86_64.appimage.zip
-judo Slicer ~/Downloads/Slicer-linux-amd64.deb
-judo Example ~/Downloads/example.tar.zst
-judo Example ~/Downloads/example.rpm
-judo --force Telegram ~/Downloads/Telegram.tar.xz
+judo ~/Downloads/Telegram.tar.xz Telegram
+judo ~/Downloads/obsidian.tar.gz Obsidian
+judo ~/Downloads/krita-5.2.9-x86_64.appimage.zip Krita
+judo ~/Downloads/Slicer-linux-amd64.deb Slicer
+judo ~/Downloads/example.tar.zst Example
+judo ~/Downloads/example.rpm Example
+judo --force ~/Downloads/Telegram.tar.xz Telegram
 ```
 
 ## Name Collision Handling
