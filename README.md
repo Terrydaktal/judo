@@ -154,7 +154,7 @@ Re-running for the same app is supported. Existing installs are moved to timesta
 
 ## Output Paths Summary
 
-For `judo MyApp app.tar.xz`:
+For `judo app.tar.xz MyApp`:
 
 - Install: `/opt/MyApp`
 - Temp extract: `/tmp/MyApp-extract`
@@ -166,6 +166,8 @@ For `judo MyApp app.tar.xz`:
 
 - `No executable found`
   - Archive likely lacks executable bit(s) or contains only installer payloads.
+- `This archive looks like a Windows-only bundle`
+  - The archive contains Windows binaries like `.exe`/`.dll` but no native Linux executable. Use a Linux release, AppImage, or source archive instead.
 - `Unsupported format`
   - Repackage as supported tar format.
 - App launches from terminal but not desktop

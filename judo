@@ -286,6 +286,29 @@ extract_archive() {
   esac
 }
 
+looks_like_windows_bundle() {
+  local root="$1"
+  local windows_hits=0
+  local non_windows_hits=0
+  local f
+  local base_lc
+
+  while IFS= read -r -d '' f; do
+    base_lc="$(basename "$f")"
+    base_lc="${base_lc,,}"
+    case "$base_lc" in
+      *.exe|*.dll|*.pdb|*.msi|*.bat|*.cmd|*.sys|*.ocx)
+        windows_hits=$((windows_hits + 1))
+        ;;
+      *.appimage|*.desktop|*.sh|*.bin|*.run)
+        non_windows_hits=$((non_windows_hits + 1))
+        ;;
+    esac
+  done < <(find "$root" -type f \( -name "*.exe" -o -name "*.dll" -o -name "*.pdb" -o -name "*.msi" -o -name "*.bat" -o -name "*.cmd" -o -name "*.sys" -o -name "*.ocx" -o -name "*.appimage" -o -name "*.desktop" -o -name "*.sh" -o -name "*.bin" -o -name "*.run" \) -print0 2>/dev/null)
+
+  (( windows_hits > 0 && non_windows_hits == 0 ))
+}
+
 score_executable() {
   local exec_path="$1"
   local filename
@@ -532,7 +555,15 @@ extract_archive "$ARCHIVE"
 
 echo "Looking for executable..."
 EXECUTABLE="$(pick_best_executable "$TEMP_DIR")"
-[[ -z "$EXECUTABLE" ]] && echo "No executable found" && exit 1
+if [[ -z "$EXECUTABLE" ]]; then
+  if looks_like_windows_bundle "$TEMP_DIR"; then
+    echo "This archive looks like a Windows-only bundle (for example .exe/.dll files) and does not contain a native Linux executable."
+    echo "Use a Linux release, AppImage, or source archive instead."
+  else
+    echo "No executable found"
+  fi
+  exit 1
+fi
 echo "Found executable: $EXECUTABLE"
 
 echo "Finding icon..."
