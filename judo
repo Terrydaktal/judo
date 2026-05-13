@@ -286,6 +286,52 @@ extract_archive() {
   esac
 }
 
+describe_archive_file_type() {
+  local path="$1"
+
+  if ! command -v file >/dev/null 2>&1; then
+    echo "unknown (file command not available)"
+    return
+  fi
+
+  file -b "$path"
+}
+
+archive_file_type_matches() {
+  local archive_path="$1"
+  local file_type="$2"
+  local archive_lc="${archive_path,,}"
+
+  [[ "$file_type" == "unknown (file command not available)" ]] && return 0
+
+  case "$archive_lc" in
+    *.tar.gz|*.tgz) [[ "$file_type" == *"gzip compressed data"* ]] ;;
+    *.tar.bz2|*.tbz2) [[ "$file_type" == *"bzip2 compressed data"* ]] ;;
+    *.tar.xz|*.txz) [[ "$file_type" == *"XZ compressed data"* ]] ;;
+    *.tar.zst|*.tzst|*.pkg.tar.zst) [[ "$file_type" == *"Zstandard compressed data"* ]] ;;
+    *.tar) [[ "$file_type" == *"tar archive"* ]] ;;
+    *.zip) [[ "$file_type" == *"Zip archive data"* ]] ;;
+    *.deb) [[ "$file_type" == *"Debian binary package"* ]] ;;
+    *.rpm) [[ "$file_type" == *"RPM"* ]] ;;
+    *) return 0 ;;
+  esac
+}
+
+preflight_archive_type() {
+  local archive_path="$1"
+  local archive_lc="${archive_path,,}"
+  local file_type
+
+  file_type="$(describe_archive_file_type "$archive_path")"
+  echo "Archive file type: $file_type"
+
+  if ! archive_file_type_matches "$archive_path" "$file_type"; then
+    echo "Archive suffix does not match the detected file type."
+    echo "Use the actual archive type shown above, or rename/correct the file."
+    return 1
+  fi
+}
+
 looks_like_windows_bundle() {
   local root="$1"
   local windows_hits=0
@@ -549,6 +595,8 @@ download_archive_if_url "$ARCHIVE_INPUT"
 echo "Preparing temporary extraction dir..."
 rm -rf "$TEMP_DIR"
 mkdir -p "$TEMP_DIR"
+
+preflight_archive_type "$ARCHIVE"
 
 echo "Extracting $ARCHIVE..."
 extract_archive "$ARCHIVE"

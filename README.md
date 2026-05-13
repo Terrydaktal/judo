@@ -40,6 +40,7 @@ Staging in `/opt/.<AppName>.staging.<pid>` is intentional:
 - Linux with Bash
 - `sudo` privileges (writes under `/opt` and optionally `/usr/share/pixmaps`)
 - `tar`
+- `file`
 - `find`, `awk`, `grep`, `install`
 - `unzip` or `bsdtar` (for `.zip`)
 - `ar` (for `.deb`)
@@ -170,6 +171,8 @@ For `judo app.tar.xz MyApp`:
   - The archive contains Windows binaries like `.exe`/`.dll` but no native Linux executable. Use a Linux release, AppImage, or source archive instead.
 - `Unsupported format`
   - Repackage as supported tar format.
+- `Archive file type: ...`
+  - `judo` prints the detected archive type before extraction. If it doesn't match the filename suffix, `judo` stops early and tells you the file is mislabeled or the wrong release artifact.
 - App launches from terminal but not desktop
   - Inspect desktop file under `~/.local/share/applications/`.
 - Command not found after install
