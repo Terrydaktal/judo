@@ -652,15 +652,39 @@ score_icon_candidate() {
   printf '%s\n' "$score"
 }
 
-list_icon_candidates() {
+list_icon_file_candidates() {
   local root="$1"
   local icon
   local score
 
   while IFS= read -r -d '' icon; do
     score="$(score_icon_candidate "$icon")"
-    printf '%s\t%s\n' "$score" "$icon"
+    printf '%s\t%s\t%s\n' "$score" "$icon" "$icon"
   done < <(find "$root" -type f \( -iname "*.png" -o -iname "*.svg" -o -iname "*.xpm" \) -print0 2>/dev/null | sort -z)
+}
+
+desktop_icon_candidate() {
+  local desktop_file="$1"
+  local icon_line
+  local icon_name
+  local resolved_path
+
+  if [[ -z "$desktop_file" || ! -f "$desktop_file" ]]; then
+    return 1
+  fi
+
+  icon_line="$(grep -m1 '^Icon=' "$desktop_file" 2>/dev/null || true)"
+  if [[ -z "$icon_line" ]]; then
+    return 1
+  fi
+
+  icon_name="${icon_line#Icon=}"
+  resolved_path="$(resolve_icon_name_path "$icon_name" || true)"
+  if [[ -z "$resolved_path" ]]; then
+    return 1
+  fi
+
+  printf '%s\t%s\t%s\n' "500" "$icon_name" "Icon=$icon_name (from desktop file, resolves to $resolved_path)"
 }
 
 score_desktop_candidate() {
@@ -689,11 +713,61 @@ score_desktop_candidate() {
   local ex_lc="${ex,,}"
   [[ -n "$ex_lc" && "$ex_lc" == *"$app_lc"* ]] && score=$((score + 40))
 
+  local icon_line
+  icon_line="$(grep -m1 '^Icon=' "$f" 2>/dev/null || true)"
+  if [[ -n "$icon_line" ]]; then
+    local icon_name="${icon_line#Icon=}"
+    if resolve_icon_name "$icon_name"; then
+      score=$((score + 90))
+    else
+      score=$((score - 60))
+    fi
+  fi
+
   if ! grep -q '^\[Desktop Entry\]' "$f" 2>/dev/null; then
     score=$((score - 200))
   fi
 
   printf '%s\n' "$score"
+}
+
+resolve_icon_name_path() {
+  local icon_name="$1"
+  local search_dir
+  local ext
+  local resolved_path
+
+  if [[ -z "$icon_name" ]]; then
+    return 1
+  fi
+
+  if [[ "$icon_name" == /* && -f "$icon_name" ]]; then
+    printf '%s\n' "$icon_name"
+    return 0
+  fi
+
+  for search_dir in \
+    "$USER_HOME/.local/share/icons" \
+    "/usr/local/share/icons" \
+    "/usr/share/icons" \
+    "/usr/share/pixmaps"
+  do
+    [[ -d "$search_dir" ]] || continue
+
+    for ext in png svg xpm ico; do
+      resolved_path="$(find "$search_dir" -type f \( -iname "${icon_name}.${ext}" -o -iname "${icon_name}" \) -print -quit 2>/dev/null || true)"
+      if [[ -n "$resolved_path" ]]; then
+        printf '%s\n' "$resolved_path"
+        return 0
+      fi
+    done
+  done
+
+  return 1
+}
+
+resolve_icon_name() {
+  resolve_icon_name_path "$1" >/dev/null
 }
 
 list_executable_candidates() {
@@ -703,7 +777,7 @@ list_executable_candidates() {
 
   while IFS= read -r -d '' exec; do
     score="$(score_executable "$exec")"
-    printf '%s\t%s\n' "$score" "$exec"
+    printf '%s\t%s\t%s\n' "$score" "$exec" "$exec"
   done < <(find "$root" -type f -executable -print0 2>/dev/null | sort -z)
 }
 
@@ -714,7 +788,7 @@ list_desktop_candidates() {
 
   while IFS= read -r -d '' f; do
     score="$(score_desktop_candidate "$f")"
-    printf '%s\t%s\n' "$score" "$f"
+    printf '%s\t%s\t%s\n' "$score" "$f" "$f"
   done < <(find "$root" -type f -name "*.desktop" -print0 2>/dev/null | sort -z)
 }
 
@@ -723,6 +797,7 @@ collect_top_candidates() {
   local root="$2"
   local kind="$3"
   local -n out="$4"
+  local selected_desktop="${5:-}"
   local line
 
   out=()
@@ -739,9 +814,16 @@ collect_top_candidates() {
       done < <(list_desktop_candidates "$root" | sort -t $'\t' -k1,1nr)
       ;;
     icon)
+      if [[ -n "$selected_desktop" ]]; then
+        local desktop_icon_candidate_line=""
+        desktop_icon_candidate_line="$(desktop_icon_candidate "$selected_desktop" || true)"
+        if [[ -n "$desktop_icon_candidate_line" ]]; then
+          out+=("$desktop_icon_candidate_line")
+        fi
+      fi
       while IFS= read -r line; do
         out+=("$line")
-      done < <(list_icon_candidates "$root" | sort -t $'\t' -k1,1nr)
+      done < <(list_icon_file_candidates "$root" | sort -t $'\t' -k1,1nr)
       ;;
     *)
       error_line "Unknown candidate kind: $kind"
@@ -754,14 +836,34 @@ collect_top_candidates() {
   fi
 }
 
+candidate_value_exists() {
+  local needle="$1"
+  local -n candidates="$2"
+  local line
+  local score
+  local value
+  local label
+
+  for line in "${candidates[@]}"; do
+    IFS=$'\t' read -r score value label <<< "$line"
+    if [[ "$value" == "$needle" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 print_candidate_block() {
   local title="$1"
   local -n candidates="$2"
   local selected_path="${3:-}"
+  local kind="${4:-generic}"
   local i
   local score
   local path
   local marker=""
+  local extra=""
 
   printf '%b%s%b\n' "${C_BOLD}${C_MAGENTA}" "$title:" "$C_RESET" >&2
   if (( ${#candidates[@]} == 0 )); then
@@ -770,15 +872,16 @@ print_candidate_block() {
   fi
 
   for i in "${!candidates[@]}"; do
-    IFS=$'\t' read -r score path <<< "${candidates[$i]}"
+    IFS=$'\t' read -r score value label <<< "${candidates[$i]}"
+    [[ -z "${label:-}" ]] && label="$value"
     marker=""
-    if [[ -n "$selected_path" && "$path" == "$selected_path" ]]; then
+    if [[ -n "$selected_path" && "$value" == "$selected_path" ]]; then
       marker="* "
     fi
     if [[ -n "$marker" ]]; then
-      printf '  %b%d)%b %b[%s]%b %s\n' "${C_GREEN}${C_BOLD}" "$((i + 1))" "$C_RESET" "${C_GREEN}${C_BOLD}" "$score" "$C_RESET" "$path" >&2
+      printf '  %b%d)%b %s%b[%s]%b %s%b\n' "${C_GREEN}${C_BOLD}" "$((i + 1))" "$C_RESET" "$marker" "${C_GREEN}${C_BOLD}" "$score" "$C_RESET" "$label" "" >&2
     else
-      printf '  %d) [%s] %s\n' "$((i + 1))" "$score" "$path" >&2
+      printf '  %d) [%s] %s\n' "$((i + 1))" "$score" "$label" >&2
     fi
   done
 }
@@ -790,7 +893,8 @@ prompt_candidate_selection() {
   local -n candidates="$4"
   local choice=""
   local score
-  local path
+  local value
+  local label
   local max_index="${#candidates[@]}"
 
   while true; do
@@ -855,8 +959,8 @@ prompt_candidate_selection() {
         ;;
       *)
         if (( max_index > 0 )) && (( choice >= 1 && choice <= max_index )); then
-          IFS=$'\t' read -r score path <<< "${candidates[$((choice - 1))]}"
-          printf '%s' "$path"
+          IFS=$'\t' read -r score value label <<< "${candidates[$((choice - 1))]}"
+          printf '%s' "$value"
           return
         fi
         if (( max_index > 0 )); then
@@ -872,19 +976,32 @@ prompt_candidate_selection() {
 review_install_choices() {
   local -n exec_candidates="$1"
   local -n desktop_candidates="$2"
-  local -n icon_candidates="$3"
+  local work_root="$3"
   local -n selected_exec="$4"
   local -n selected_desktop="$5"
   local -n selected_icon="$6"
+  local icon_candidates=()
   local selection
 
   while true; do
-    print_candidate_block "Executable candidates" exec_candidates "$selected_exec"
-    print_candidate_block "Desktop file candidates" desktop_candidates "$selected_desktop"
-    print_candidate_block "Icon candidates" icon_candidates "$selected_icon"
+    collect_top_candidates 10 "$work_root" icon icon_candidates "$selected_desktop"
+    if [[ -n "$selected_icon" ]]; then
+      if [[ "$selected_icon" == /* && -e "$selected_icon" ]]; then
+        : # keep absolute-path overrides as-is
+      elif ! candidate_value_exists "$selected_icon" icon_candidates; then
+        selected_icon=""
+      fi
+    fi
+    if [[ -z "$selected_icon" && ${#icon_candidates[@]} > 0 ]]; then
+      IFS=$'\t' read -r _ selected_icon _ <<< "${icon_candidates[0]}"
+    fi
+
+    print_candidate_block "Desktop file candidates" desktop_candidates "$selected_desktop" "desktop"
+    print_candidate_block "Executable candidates" exec_candidates "$selected_exec" "exec"
+    print_candidate_block "Icon candidates" icon_candidates "$selected_icon" "icon"
     printf '%b%s%b\n' "${C_BOLD}${C_CYAN}" "Selected defaults:" "$C_RESET" >&2
-    printf '  Executable: %b%s%b\n' "$C_GREEN" "${selected_exec:-<none>}" "$C_RESET" >&2
     printf '  Desktop file: %b%s%b\n' "$C_GREEN" "${selected_desktop:-<generate>}" "$C_RESET" >&2
+    printf '  Executable: %b%s%b\n' "$C_GREEN" "${selected_exec:-<none>}" "$C_RESET" >&2
     printf '  Icon: %b%s%b\n' "$C_GREEN" "${selected_icon:-<none>}" "$C_RESET" >&2
 
     if [[ ! -t 0 ]]; then
@@ -900,10 +1017,10 @@ review_install_choices() {
       x|cancel|n|no)
         echo "Cancelled."
         exit 1
-        ;;
+      ;;
       e|edit)
-        selected_exec="$(prompt_candidate_selection "executable" 0 "$selected_exec" exec_candidates)"
         selected_desktop="$(prompt_candidate_selection "desktop file" 1 "$selected_desktop" desktop_candidates)"
+        selected_exec="$(prompt_candidate_selection "executable" 0 "$selected_exec" exec_candidates)"
         selected_icon="$(prompt_candidate_selection "icon" 1 "$selected_icon" icon_candidates)"
         ;;
       *)
@@ -1008,24 +1125,20 @@ fi
 
 collect_top_candidates 10 "$WORK_ROOT" exec EXEC_CANDIDATES
 collect_top_candidates 10 "$WORK_ROOT" desktop DESKTOP_CANDIDATES
-collect_top_candidates 10 "$WORK_ROOT" icon ICON_CANDIDATES
 
 SELECTED_EXECUTABLE="$EXECUTABLE_HINT"
 if (( ${#EXEC_CANDIDATES[@]} > 0 )); then
-  IFS=$'\t' read -r _ SELECTED_EXECUTABLE <<< "${EXEC_CANDIDATES[0]}"
+  IFS=$'\t' read -r _ SELECTED_EXECUTABLE _ <<< "${EXEC_CANDIDATES[0]}"
 fi
 
 SELECTED_DESKTOP_FILE=""
 if (( ${#DESKTOP_CANDIDATES[@]} > 0 )); then
-  IFS=$'\t' read -r _ SELECTED_DESKTOP_FILE <<< "${DESKTOP_CANDIDATES[0]}"
+  IFS=$'\t' read -r _ SELECTED_DESKTOP_FILE _ <<< "${DESKTOP_CANDIDATES[0]}"
 fi
 
 SELECTED_ICON=""
-if (( ${#ICON_CANDIDATES[@]} > 0 )); then
-  IFS=$'\t' read -r _ SELECTED_ICON <<< "${ICON_CANDIDATES[0]}"
-fi
 
-review_install_choices EXEC_CANDIDATES DESKTOP_CANDIDATES ICON_CANDIDATES SELECTED_EXECUTABLE SELECTED_DESKTOP_FILE SELECTED_ICON
+review_install_choices EXEC_CANDIDATES DESKTOP_CANDIDATES "$WORK_ROOT" SELECTED_EXECUTABLE SELECTED_DESKTOP_FILE SELECTED_ICON
 
 if (( SOURCE_IS_DIRECTORY == 0 )); then
   info_line "Replacing install directory under /opt..."
@@ -1072,7 +1185,7 @@ DESKTOP_CATEGORIES="Network;"
 ICON_ENTRY="Icon=$APP_NAME"
 
 if [[ -n "${FINAL_ICON:-}" ]]; then
-  if (( SOURCE_IS_DIRECTORY == 0 )); then
+  if [[ -f "$FINAL_ICON" ]] && (( SOURCE_IS_DIRECTORY == 0 )); then
     ICON_NAME="$(basename "$FINAL_ICON")"
     sudo cp "$FINAL_ICON" "/usr/share/pixmaps/$ICON_NAME" 2>/dev/null || true
     ICON_ENTRY="Icon=$ICON_NAME"
@@ -1095,7 +1208,12 @@ if [[ -n "${FINAL_DESKTOP_VENDOR:-}" && -f "$FINAL_DESKTOP_VENDOR" ]]; then
 
   vendor_icon_line="$(grep -m1 '^Icon=' "$FINAL_DESKTOP_VENDOR" 2>/dev/null || true)"
   if [[ "$ICON_ENTRY" == "Icon=$APP_NAME" && -n "$vendor_icon_line" ]]; then
-    ICON_ENTRY="$vendor_icon_line"
+    vendor_icon_name="${vendor_icon_line#Icon=}"
+    if resolve_icon_name "$vendor_icon_name"; then
+      ICON_ENTRY="$vendor_icon_line"
+    else
+      warn_line "Vendor icon '$vendor_icon_name' does not resolve in installed icon themes; using fallback icon instead."
+    fi
   fi
 
   if write_desktop_from_vendor "$FINAL_DESKTOP_VENDOR" "$TMP_DESKTOP" "$APP_NAME" "$EXEC_LINE" "$ICON_ENTRY" "$DESKTOP_CATEGORIES"; then

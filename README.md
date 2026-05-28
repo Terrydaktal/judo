@@ -145,16 +145,18 @@ If no usable vendor file exists, `judo` generates a minimal desktop entry.
 
 `Exec` points to the selected executable. For archive inputs this is the executable under `/opt/<AppName>`; for directory inputs it is the executable inside the provided directory. When possible, vendor `Exec` suffix arguments/field codes are preserved.
 
-`judo` prints the top desktop file candidates, auto-selects the best one, and then lets you confirm, edit, or cancel before it writes the final desktop file.
+`judo` prints the desktop file candidates first, then the executable candidates, then the icon candidates. It auto-selects the best option in each section and then lets you confirm, edit, or cancel before it writes the final desktop file. If the selected desktop file has a usable `Icon=` entry, that icon is shown in the icon shortlist with the resolved path it came from.
 
 ## Icon Behavior
 
 - `judo` scores image candidates (`.png`, `.svg`, `.xpm`) and prefers obvious app icons such as `logo.png`, `icon.svg`, or filenames matching the app name
 - It avoids obvious test/doc/example assets like `tests/small16x16.png`, `docs/`, and screenshot thumbnails
-- `judo` prints the top executable, desktop file, and icon candidates, auto-selects the top choice for each, and then stops for a final confirm/edit/cancel prompt
+- `judo` prints the desktop file, executable, and icon candidates in that order, auto-selects the top choice for each, and then stops for a final confirm/edit/cancel prompt
 - In the edit step, you can override any of the three by number or by absolute path
+- If a selected desktop file contains a resolvable `Icon=` value, that icon appears in the icon shortlist as a desktop-file-derived candidate with its resolved absolute path
 - Archive input: best-effort copy to `/usr/share/pixmaps/<icon>` and the desktop file uses the icon basename
 - Directory input: the desktop file points to the icon where it already lives inside the source tree
+- Vendor `Icon=<name>` entries are only preserved when that icon name resolves in the installed icon themes or pixmap directories
 - If no icon is found, the desktop file falls back to `Icon=<AppName>`
 
 ## Re-running Safely
