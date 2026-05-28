@@ -1,44 +1,45 @@
 # judo
 
-`judo` installs self-contained Linux applications distributed as archives.
+`judo` installs self-contained Linux applications from archives, package payloads, URLs, or local directories.
 
-It extracts the archive, picks the most likely main executable, installs the app under `/opt/<AppName>`, creates a user desktop launcher, and creates a user command symlink in `~/.local/bin`.
+It extracts or inspects the input, picks the most likely main executable, and then either installs the app under `/opt/<AppName>` for archive inputs or keeps the source tree in place for directory inputs. In both cases it creates a user desktop launcher and a user command symlink in `~/.local/bin`.
 
 ## What It Does
 
 Given:
 
 ```bash
-judo [--force] <tar-file-or-url> <AppName>
+judo [--force] <source-path-or-url> <AppName>
 ```
 
 it will:
 
-1. Resolve name conflicts for `/opt/<AppName>`, `~/.local/share/applications/<appname>.desktop`, and `~/.local/bin/<appname>` (overwrite, new name, or cancel).
+1. Resolve name conflicts for `~/.local/share/applications/<appname>.desktop` and `~/.local/bin/<appname>` in all cases, and also `/opt/<AppName>` for archive inputs.
 2. If input is an `http://` / `https://` URL, download it with `curl -L` first.
-3. Prepare a clean extraction directory at `/tmp/<AppName>-extract`.
-4. Extract the archive payload into that temp tree (tar/zip/package payload extraction depending on format).
-5. Score executable candidates and choose the best match for `<AppName>`.
-6. Find an icon candidate if one exists.
-7. Choose the staging source tree from extracted content.
-8. Stage files under `/opt/.<AppName>.staging.<pid>`.
-9. Re-score executable from staged content.
-10. Reuse or generate a desktop file and set managed keys (`Name`, `Exec`, `Icon`, etc.).
-11. Atomically replace `/opt/<AppName>` (backing up previous install to `/opt/.<AppName>.backup.<timestamp>` when present).
-12. Create/update `~/.local/share/applications/<appname>.desktop` and `~/.local/bin/<appname>`.
+3. If input is a directory, use it directly as the source tree and skip archive extraction and `/opt` staging.
+4. For archive inputs, prepare a clean extraction directory at `/tmp/<AppName>-extract`.
+5. Extract the archive payload into that temp tree (tar/zip/package payload extraction depending on format).
+6. Score executable candidates and choose the best match for `<AppName>`.
+7. Find an icon candidate if one exists.
+8. For archive inputs, choose a staging source tree from extracted content and stage files under `/opt/.<AppName>.staging.<pid>`.
+9. For archive inputs, re-score the executable from staged content and atomically replace `/opt/<AppName>`.
+10. Show the top executable, desktop file, and icon candidates, auto-pick the top one for each, and ask for a final confirm/edit/cancel step.
+11. If you edit, you can choose an executable, desktop file, or icon by number or by absolute path.
+12. Reuse or generate a desktop file and set managed keys (`Name`, `Exec`, `Icon`, etc.).
+13. Create/update `~/.local/share/applications/<appname>.desktop` and `~/.local/bin/<appname>`.
 
-Staging in `/opt/.<AppName>.staging.<pid>` is intentional:
+Staging in `/opt/.<AppName>.staging.<pid>` is intentional for archive inputs:
 
 - It keeps staging on the same filesystem as `/opt/<AppName>`, so the final `mv` is an atomic rename instead of a cross-filesystem copy.
 - It reduces half-installed states if something fails before final replacement.
 - It is cleaned up automatically: on success it is renamed into place, and on failure/exit the cleanup trap removes the staging directory.
 
-`/tmp` is still used for extraction, but not for final staging/swap.
+`/tmp` is still used for extraction, but not for final staging/swap. Directory inputs bypass `/opt` staging entirely.
 
 ## Requirements
 
 - Linux with Bash
-- `sudo` privileges (writes under `/opt` and optionally `/usr/share/pixmaps`)
+- `sudo` privileges for archive installs (writes under `/opt` and optionally `/usr/share/pixmaps`)
 - `tar`
 - `file`
 - `find`, `awk`, `grep`, `install`
@@ -84,7 +85,7 @@ sudo install -m 755 ./judo /usr/local/bin/judo
 ## Usage
 
 ```bash
-judo [--force] <tar-file-or-url> <AppName>
+judo [--force] <source-path-or-url> <AppName>
 ```
 
 Examples:
@@ -96,12 +97,13 @@ judo ~/Downloads/krita-5.2.9-x86_64.appimage.zip Krita
 judo ~/Downloads/Slicer-linux-amd64.deb Slicer
 judo ~/Downloads/example.tar.zst Example
 judo ~/Downloads/example.rpm Example
+judo ~/src/copyq copyq
 judo --force ~/Downloads/Telegram.tar.xz Telegram
 ```
 
 ## Name Collision Handling
 
-Before extraction, `judo` checks for existing generated targets:
+Before installation work, `judo` checks for existing generated targets:
 
 - `/opt/<AppName>`
 - `~/.local/share/applications/<appname>.desktop`
@@ -124,12 +126,12 @@ If conflicts exist:
 
 It de-prioritizes likely helper binaries (`test`, `debug`, `helper`, `daemon`).
 
-## Copy/Install Modes
+## Source Modes
 
 After the best executable is found:
 
-- Nested layout: if executable is inside a subdirectory under extraction root, `judo` copies that subdirectory contents
-- Flat layout: otherwise, `judo` copies the full extracted tree
+- Archive input: `judo` stages the extracted tree under `/opt/.<AppName>.staging.<pid>`, then renames it into `/opt/<AppName>`.
+- Directory input: `judo` leaves the source tree where it is and only creates/replaces the desktop file and `~/.local/bin` symlink.
 
 ## Desktop File Behavior
 
@@ -141,17 +143,23 @@ If a vendor `.desktop` file is found:
 
 If no usable vendor file exists, `judo` generates a minimal desktop entry.
 
-`Exec` points to the final installed executable in `/opt/<AppName>`. When possible, vendor `Exec` suffix arguments/field codes are preserved.
+`Exec` points to the selected executable. For archive inputs this is the executable under `/opt/<AppName>`; for directory inputs it is the executable inside the provided directory. When possible, vendor `Exec` suffix arguments/field codes are preserved.
+
+`judo` prints the top desktop file candidates, auto-selects the best one, and then lets you confirm, edit, or cancel before it writes the final desktop file.
 
 ## Icon Behavior
 
-- First icon candidate (`.png`, `.svg`, `.xpm`) is selected
-- Best-effort copy to `/usr/share/pixmaps/<icon>`
-- Desktop entry uses icon basename when available; otherwise falls back to `Icon=<AppName>`
+- `judo` scores image candidates (`.png`, `.svg`, `.xpm`) and prefers obvious app icons such as `logo.png`, `icon.svg`, or filenames matching the app name
+- It avoids obvious test/doc/example assets like `tests/small16x16.png`, `docs/`, and screenshot thumbnails
+- `judo` prints the top executable, desktop file, and icon candidates, auto-selects the top choice for each, and then stops for a final confirm/edit/cancel prompt
+- In the edit step, you can override any of the three by number or by absolute path
+- Archive input: best-effort copy to `/usr/share/pixmaps/<icon>` and the desktop file uses the icon basename
+- Directory input: the desktop file points to the icon where it already lives inside the source tree
+- If no icon is found, the desktop file falls back to `Icon=<AppName>`
 
 ## Re-running Safely
 
-Re-running for the same app is supported. Existing installs are moved to timestamped backups under `/opt` before replacement.
+Re-running for the same app is supported. Archive installs are moved to timestamped backups under `/opt` before replacement. Directory installs simply replace the desktop file and `~/.local/bin` symlink.
 
 ## Output Paths Summary
 
@@ -162,6 +170,12 @@ For `judo app.tar.xz MyApp`:
 - Desktop: `~/.local/share/applications/myapp.desktop`
 - Symlink: `~/.local/bin/myapp`
 - Backup (if replaced): `/opt/.MyApp.backup.YYYYMMDD-HHMMSS`
+
+For `judo ~/src/MyApp MyApp`:
+
+- Install: stays in `~/src/MyApp`
+- Desktop: `~/.local/share/applications/myapp.desktop`
+- Symlink: `~/.local/bin/myapp`
 
 ## Troubleshooting
 

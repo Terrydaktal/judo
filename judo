@@ -3,21 +3,24 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-judo installs a self-contained application distributed as an archive by extracting it, heuristically selecting the most likely main executable, copying the application files into /opt/<AppName>, creating a per-user desktop launcher in ~/.local/share/applications, and creating a per-user command symlink in ~/.local/bin (lowercased). It is safe to re-run: each run clears the temporary extraction directory, stages the install under /opt, and replaces any existing /opt/<AppName> with a timestamped backup.
+judo installs a self-contained application from either an archive, a URL, or a directory by extracting or inspecting it, heuristically selecting the most likely main executable, and then either keeping the source tree in place or copying the application files into /opt/<AppName>. It always creates a per-user desktop launcher in ~/.local/share/applications and a per-user command symlink in ~/.local/bin (lowercased). Archive installs are safe to re-run: each run clears the temporary extraction directory, stages the install under /opt, and replaces any existing /opt/<AppName> with a timestamped backup.
 
 Usage:
-  judo [--force] <tar-file-or-url> <AppName>
+  judo [--force] <source-path-or-url> <AppName>
 
 Arguments:
-  <tar-file-or-url>
-              Archive path or http(s) URL to install
+  <source-path-or-url>
+              Archive path, directory path, or http(s) URL to install
               (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .tar.zst/.tzst,
-               .pkg.tar.zst, .zip, .deb, .rpm)
+               .pkg.tar.zst, .zip, .deb, .rpm, or a folder containing a project or extracted archive)
   <AppName>   Logical application name used for naming paths and selecting an executable.
 
 What it creates (derived from <AppName>):
-  Install directory:
+  Archive install directory:
     /opt/<AppName>
+
+  Directory install:
+    Source tree stays where it is; only the desktop file and ~/.local/bin symlink are created/updated.
 
   Temporary extraction directory:
     /tmp/<AppName>-extract
@@ -35,12 +38,13 @@ Executable selection:
   directories; de-prioritizes common helper/debug/test/daemon executables).
 
 Install modes (copy source selection):
-  Mode A (nested layout detected):
-    If the chosen executable resides inside a subdirectory under the extracted tree,
-    the script copies that executable's directory contents into /opt/<AppName>.
+  Mode A (archive input):
+    The archive is extracted, staged under /opt/.<AppName>.staging.<pid>, and then
+    atomically moved into /opt/<AppName>.
 
-  Mode B (flat/root layout):
-    Otherwise, the script copies the entire extracted tree into /opt/<AppName>.
+  Mode B (directory input):
+    The source tree is kept in place. judo only creates/replaces the desktop file and
+    ~/.local/bin symlink, both pointing at the executable inside the provided directory.
 
 Desktop file behavior:
   If a vendor *.desktop file is found inside the archive, judo will reuse it but overwrite:
@@ -49,17 +53,21 @@ Desktop file behavior:
   If no vendor desktop file is found, judo generates a minimal desktop file.
 
 Re-run behavior:
-  Safe to run multiple times. Each run:
-    - clears the temp extraction directory
-    - stages install under /opt and atomically replaces /opt/<AppName>
-    - moves any previous /opt/<AppName> to /opt/.<AppName>.backup.<timestamp>
+  Safe to run multiple times. Archive runs:
+    - clear the temp extraction directory
+    - stage install under /opt and atomically replace /opt/<AppName>
+    - move any previous /opt/<AppName> to /opt/.<AppName>.backup.<timestamp>
+  Directory runs:
+    - leave the source tree where it is
+    - replace the desktop file and ~/.local/bin symlink in place
 
 Notes:
   - The symlink and desktop file names are derived from <AppName> but are lowercased.
   - Ensure ~/.local/bin is on your PATH to run <appname> from the terminal.
-  - If generated names already exist in /opt, ~/.local/share/applications, or ~/.local/bin,
-    judo asks whether to overwrite, use a new name, or cancel.
-  - If <tar-file-or-url> starts with http:// or https://, judo downloads it using curl -L first.
+  - If generated names already exist, judo asks whether to overwrite, use a new name, or cancel.
+    Archive installs include /opt/<AppName>; directory installs only check the desktop file and ~/.local/bin symlink.
+  - If <source-path-or-url> starts with http:// or https://, judo downloads it using curl -L first.
+  - If <source-path-or-url> is a directory, judo uses it directly as the source tree.
   - For .deb/.rpm input, judo extracts package payload only, then installs from that tree.
 EOF
 }
@@ -80,7 +88,7 @@ while (( $# > 0 )); do
       break
       ;;
     -*)
-      echo "Unknown option: $1"
+      error_line "Unknown option: $1"
       usage
       exit 1
       ;;
@@ -95,15 +103,74 @@ if (( $# != 2 )); then
   exit 1
 fi
 
-ARCHIVE_INPUT="$1"
+SOURCE_INPUT="$1"
 APP_NAME="$2"
-ARCHIVE="$ARCHIVE_INPUT"
+ARCHIVE="$SOURCE_INPUT"
 DOWNLOADED_ARCHIVE=""
 DEB_WORK_DIR=""
+SOURCE_ROOT=""
+SOURCE_IS_DIRECTORY=0
 
 USER_NAME="$(logname)"
 USER_HOME="$(eval echo "~${USER_NAME}")"
 LOCAL_BIN_DIR="${USER_HOME}/.local/bin"
+
+COLOR_ENABLED=0
+if [[ -z "${NO_COLOR:-}" && ( -t 0 || -t 1 || -t 2 ) ]]; then
+  COLOR_ENABLED=1
+fi
+
+if (( COLOR_ENABLED == 1 )); then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_DIM=$'\033[2m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_BLUE=$'\033[34m'
+  C_MAGENTA=$'\033[35m'
+  C_CYAN=$'\033[36m'
+else
+  C_RESET=""
+  C_BOLD=""
+  C_DIM=""
+  C_RED=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_BLUE=""
+  C_MAGENTA=""
+  C_CYAN=""
+fi
+
+color_wrap() {
+  local color="$1"
+  shift
+  printf '%b%s%b' "$color" "$*" "$C_RESET"
+}
+
+status_line() {
+  printf '%b%s%b\n' "${C_BOLD}${C_CYAN}" "$*" "$C_RESET"
+}
+
+info_line() {
+  printf '%b%s%b\n' "$C_CYAN" "$*" "$C_RESET"
+}
+
+warn_line() {
+  printf '%b%s%b\n' "$C_YELLOW" "$*" "$C_RESET"
+}
+
+error_line() {
+  printf '%b%s%b\n' "$C_RED" "$*" "$C_RESET" >&2
+}
+
+success_line() {
+  printf '%b%s%b\n' "$C_GREEN" "$*" "$C_RESET"
+}
+
+prompt_text() {
+  printf '%b%s%b' "${C_BOLD}${C_BLUE}" "$*" "$C_RESET"
+}
 
 refresh_name_paths() {
   INSTALL_DIR="/opt/${APP_NAME}"
@@ -128,7 +195,7 @@ trap cleanup EXIT
 find_name_conflicts() {
   NAME_CONFLICTS=()
 
-  if [[ -e "$INSTALL_DIR" ]]; then
+  if (( SOURCE_IS_DIRECTORY == 0 )) && [[ -e "$INSTALL_DIR" ]]; then
     NAME_CONFLICTS+=("Install path exists: $INSTALL_DIR")
   fi
   if [[ -e "$DESKTOP_FILE" ]]; then
@@ -166,7 +233,7 @@ download_archive_if_url() {
   fi
 
   if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required to download URL archives."
+    error_line "curl is required to download URL archives."
     exit 1
   fi
 
@@ -187,10 +254,10 @@ download_archive_if_url() {
   esac
 
   DOWNLOADED_ARCHIVE="$(mktemp "/tmp/judo-download.XXXXXX${suffix}")"
-  echo "Downloading archive from URL: $input"
+  info_line "Downloading archive from URL: $input"
   curl -fL "$input" -o "$DOWNLOADED_ARCHIVE"
   ARCHIVE="$DOWNLOADED_ARCHIVE"
-  echo "Downloaded archive: $ARCHIVE"
+  success_line "Downloaded archive: $ARCHIVE"
 }
 
 extract_deb_payload() {
@@ -198,7 +265,7 @@ extract_deb_payload() {
   local data_archive=""
 
   if ! command -v ar >/dev/null 2>&1; then
-    echo "ar is required to extract .deb files."
+    error_line "ar is required to extract .deb files."
     exit 1
   fi
 
@@ -210,11 +277,11 @@ extract_deb_payload() {
 
   data_archive="$(find "$DEB_WORK_DIR" -maxdepth 1 -type f -name 'data.tar*' | head -1 || true)"
   if [[ -z "$data_archive" ]]; then
-    echo "Unsupported .deb: payload archive data.tar.* not found"
+    error_line "Unsupported .deb: payload archive data.tar.* not found"
     exit 1
   fi
 
-  echo "Extracting Debian payload: $(basename "$data_archive")"
+  info_line "Extracting Debian payload: $(basename "$data_archive")"
   tar -xf "$data_archive" -C "$TEMP_DIR"
 }
 
@@ -230,7 +297,7 @@ extract_zip_payload() {
     return
   fi
 
-  echo "zip extraction requires unzip or bsdtar."
+    error_line "zip extraction requires unzip or bsdtar."
   exit 1
 }
 
@@ -244,7 +311,7 @@ extract_tar_zst_payload() {
     return
   fi
 
-  echo "Could not extract zstd tar archive; requires tar with zstd support (or zstd)."
+    error_line "Could not extract zstd tar archive; requires tar with zstd support (or zstd)."
   exit 1
 }
 
@@ -265,7 +332,7 @@ extract_rpm_payload() {
     return
   fi
 
-  echo "rpm extraction requires bsdtar or rpm2cpio+cpio."
+    error_line "rpm extraction requires bsdtar or rpm2cpio+cpio."
   exit 1
 }
 
@@ -282,7 +349,7 @@ extract_archive() {
     *.zip) extract_zip_payload "$archive_path" ;;
     *.deb) extract_deb_payload "$archive_path" ;;
     *.rpm) extract_rpm_payload "$archive_path" ;;
-    *) echo "Unsupported format"; exit 1 ;;
+    *) error_line "Unsupported format"; exit 1 ;;
   esac
 }
 
@@ -290,7 +357,7 @@ describe_archive_file_type() {
   local path="$1"
 
   if ! command -v file >/dev/null 2>&1; then
-    echo "unknown (file command not available)"
+    info_line "unknown (file command not available)"
     return
   fi
 
@@ -323,11 +390,11 @@ preflight_archive_type() {
   local file_type
 
   file_type="$(describe_archive_file_type "$archive_path")"
-  echo "Archive file type: $file_type"
+  info_line "Archive file type: $file_type"
 
   if ! archive_file_type_matches "$archive_path" "$file_type"; then
-    echo "Archive suffix does not match the detected file type."
-    echo "Use the actual archive type shown above, or rename/correct the file."
+    warn_line "Archive suffix does not match the detected file type."
+    warn_line "Use the actual archive type shown above, or rename/correct the file."
     return 1
   fi
 }
@@ -419,7 +486,7 @@ determine_stage_source() {
 
   if (( ${#top_entries[@]} == 1 )) && [[ -d "${top_entries[0]}" ]]; then
     STAGE_SOURCE="${top_entries[0]}"
-    echo "Detected single top-level directory; staging from: $STAGE_SOURCE"
+    info_line "Detected single top-level directory; staging from: $STAGE_SOURCE"
     return
   fi
 
@@ -427,12 +494,12 @@ determine_stage_source() {
   top_dir="${rel_path%%/*}"
   if [[ "$rel_path" != "$EXECUTABLE" && -n "$top_dir" && -d "$TEMP_DIR/$top_dir" ]]; then
     STAGE_SOURCE="$TEMP_DIR/$top_dir"
-    echo "Detected grouped layout; staging from: $STAGE_SOURCE"
+    info_line "Detected grouped layout; staging from: $STAGE_SOURCE"
     return
   fi
 
   STAGE_SOURCE="$TEMP_DIR"
-  echo "Staging from extracted root."
+  info_line "Staging from extracted root."
 }
 
 resolve_name_conflicts() {
@@ -443,35 +510,35 @@ resolve_name_conflicts() {
     fi
 
     if (( FORCE == 1 )); then
-      echo "Force enabled; proceeding despite name conflicts:"
+      success_line "Force enabled; proceeding despite name conflicts:"
       printf '  - %s\n' "${NAME_CONFLICTS[@]}"
       return
     fi
 
     if [[ ! -t 0 ]]; then
-      echo "Name conflicts detected for '$APP_NAME':"
+      warn_line "Name conflicts detected for '$APP_NAME':"
       printf '  - %s\n' "${NAME_CONFLICTS[@]}"
-      echo "Re-run with --force to replace these targets, or choose a different AppName."
+      warn_line "Re-run with --force to replace these targets, or choose a different AppName."
       exit 1
     fi
 
-    echo "Name conflicts detected for '$APP_NAME':"
-    printf '  - %s\n' "${NAME_CONFLICTS[@]}"
-    echo "Overwrite existing targets? [y]es, [n]ew name, [c]ancel"
+    warn_line "Name conflicts detected for '$APP_NAME':"
+      printf '  - %s\n' "${NAME_CONFLICTS[@]}"
+    status_line "Overwrite existing targets? [y]es, [n]ew name, [c]ancel"
 
     while true; do
       read -r -p "> " choice
       case "${choice,,}" in
         y|yes|f|force)
           FORCE=1
-          echo "Proceeding with overwrite for '$APP_NAME'."
+          success_line "Proceeding with overwrite for '$APP_NAME'."
           return
           ;;
         n|new)
           while true; do
             read -r -p "Enter new AppName: " new_name
             if ! validate_app_name "$new_name"; then
-              echo "Invalid name. Use a non-empty name without '/'."
+              warn_line "Invalid name. Use a non-empty name without '/'."
               continue
             fi
             APP_NAME="$new_name"
@@ -481,11 +548,11 @@ resolve_name_conflicts() {
           break
           ;;
         c|cancel)
-          echo "Cancelled."
+          error_line "Cancelled."
           exit 1
           ;;
         *)
-          echo "Please type n, f, or c."
+          warn_line "Please type n, f, or c."
           ;;
       esac
     done
@@ -543,6 +610,309 @@ pick_best_desktop_file() {
   fi
 }
 
+score_icon_candidate() {
+  local icon_path="$1"
+  local filename
+  local filename_lc
+  local app_lc
+  local score=0
+
+  filename="$(basename "$icon_path")"
+  filename_lc="${filename,,}"
+  app_lc="${APP_NAME,,}"
+
+  # Strong filename hints.
+  [[ "$filename_lc" == "$app_lc".* ]] && score=$((score + 180))
+  [[ "$filename_lc" == "${app_lc}"-* || "$filename_lc" == "${app_lc}"_* ]] && score=$((score + 150))
+  [[ "$filename_lc" == *"$app_lc"* ]] && score=$((score + 120))
+  [[ "$filename_lc" == *"logo"* ]] && score=$((score + 140))
+  [[ "$filename_lc" == *"icon"* ]] && score=$((score + 120))
+
+  # Prefer canonical icon-ish locations.
+  [[ "$icon_path" == */share/icons/* ]] && score=$((score + 70))
+  [[ "$icon_path" == */icons/* ]] && score=$((score + 50))
+  [[ "$icon_path" == */pixmaps/* ]] && score=$((score + 40))
+  [[ "$icon_path" == */hicolor/* ]] && score=$((score + 30))
+  [[ "$icon_path" == */icon/* ]] && score=$((score + 20))
+
+  # Prefer files near the top of the source tree.
+  [[ "$icon_path" != *"/."* ]] && score=$((score + 10))
+  [[ "$icon_path" == */./* ]] && score=$((score - 20))
+
+  # Penalize obvious non-icons and test assets.
+  [[ "$icon_path" == */test/* || "$icon_path" == */tests/* || "$icon_path" == */testdata/* ]] && score=$((score - 180))
+  [[ "$icon_path" == */example/* || "$icon_path" == */examples/* || "$icon_path" == */demo/* || "$icon_path" == */samples/* || "$icon_path" == */sample/* ]] && score=$((score - 120))
+  [[ "$icon_path" == */doc/* || "$icon_path" == */docs/* ]] && score=$((score - 100))
+  [[ "$icon_path" == */screenshot/* || "$icon_path" == */screenshots/* ]] && score=$((score - 150))
+  [[ "$filename_lc" == *"screenshot"* ]] && score=$((score - 150))
+  [[ "$filename_lc" == *"thumb"* ]] && score=$((score - 120))
+  [[ "$filename_lc" == *"small"* ]] && score=$((score - 80))
+  [[ "$filename_lc" == *"16x16"* || "$filename_lc" == *"24x24"* || "$filename_lc" == *"32x32"* || "$filename_lc" == *"48x48"* ]] && score=$((score - 100))
+
+  printf '%s\n' "$score"
+}
+
+list_icon_candidates() {
+  local root="$1"
+  local icon
+  local score
+
+  while IFS= read -r -d '' icon; do
+    score="$(score_icon_candidate "$icon")"
+    printf '%s\t%s\n' "$score" "$icon"
+  done < <(find "$root" -type f \( -iname "*.png" -o -iname "*.svg" -o -iname "*.xpm" \) -print0 2>/dev/null | sort -z)
+}
+
+score_desktop_candidate() {
+  local f="$1"
+  local app_lc="${APP_NAME,,}"
+  local score=0
+  local base
+  local base_lc
+
+  base="$(basename "$f")"
+  base_lc="${base,,}"
+
+  [[ "$base_lc" == "${app_lc}.desktop" ]] && score=$((score + 200))
+  [[ "$base_lc" == *"$app_lc"* ]] && score=$((score + 80))
+  [[ "$f" == */share/applications/* ]] && score=$((score + 60))
+  [[ "$f" == */applications/* ]] && score=$((score + 30))
+
+  local name
+  name="$(grep -m1 '^Name=' "$f" 2>/dev/null | cut -d= -f2- || true)"
+  local name_lc="${name,,}"
+  [[ -n "$name_lc" && "$name_lc" == "$app_lc" ]] && score=$((score + 140))
+  [[ -n "$name_lc" && "$name_lc" == *"$app_lc"* ]] && score=$((score + 70))
+
+  local ex
+  ex="$(grep -m1 '^Exec=' "$f" 2>/dev/null | cut -d= -f2- || true)"
+  local ex_lc="${ex,,}"
+  [[ -n "$ex_lc" && "$ex_lc" == *"$app_lc"* ]] && score=$((score + 40))
+
+  if ! grep -q '^\[Desktop Entry\]' "$f" 2>/dev/null; then
+    score=$((score - 200))
+  fi
+
+  printf '%s\n' "$score"
+}
+
+list_executable_candidates() {
+  local root="$1"
+  local exec
+  local score
+
+  while IFS= read -r -d '' exec; do
+    score="$(score_executable "$exec")"
+    printf '%s\t%s\n' "$score" "$exec"
+  done < <(find "$root" -type f -executable -print0 2>/dev/null | sort -z)
+}
+
+list_desktop_candidates() {
+  local root="$1"
+  local f
+  local score
+
+  while IFS= read -r -d '' f; do
+    score="$(score_desktop_candidate "$f")"
+    printf '%s\t%s\n' "$score" "$f"
+  done < <(find "$root" -type f -name "*.desktop" -print0 2>/dev/null | sort -z)
+}
+
+collect_top_candidates() {
+  local max_candidates="$1"
+  local root="$2"
+  local kind="$3"
+  local -n out="$4"
+  local line
+
+  out=()
+
+  case "$kind" in
+    exec)
+      while IFS= read -r line; do
+        out+=("$line")
+      done < <(list_executable_candidates "$root" | sort -t $'\t' -k1,1nr)
+      ;;
+    desktop)
+      while IFS= read -r line; do
+        out+=("$line")
+      done < <(list_desktop_candidates "$root" | sort -t $'\t' -k1,1nr)
+      ;;
+    icon)
+      while IFS= read -r line; do
+        out+=("$line")
+      done < <(list_icon_candidates "$root" | sort -t $'\t' -k1,1nr)
+      ;;
+    *)
+      error_line "Unknown candidate kind: $kind"
+      exit 1
+      ;;
+  esac
+
+  if (( ${#out[@]} > max_candidates )); then
+    out=("${out[@]:0:max_candidates}")
+  fi
+}
+
+print_candidate_block() {
+  local title="$1"
+  local -n candidates="$2"
+  local selected_path="${3:-}"
+  local i
+  local score
+  local path
+  local marker=""
+
+  printf '%b%s%b\n' "${C_BOLD}${C_MAGENTA}" "$title:" "$C_RESET" >&2
+  if (( ${#candidates[@]} == 0 )); then
+    printf '%b%s%b\n' "$C_DIM" "  <none>" "$C_RESET" >&2
+    return
+  fi
+
+  for i in "${!candidates[@]}"; do
+    IFS=$'\t' read -r score path <<< "${candidates[$i]}"
+    marker=""
+    if [[ -n "$selected_path" && "$path" == "$selected_path" ]]; then
+      marker="* "
+    fi
+    if [[ -n "$marker" ]]; then
+      printf '  %b%d)%b %b[%s]%b %s\n' "${C_GREEN}${C_BOLD}" "$((i + 1))" "$C_RESET" "${C_GREEN}${C_BOLD}" "$score" "$C_RESET" "$path" >&2
+    else
+      printf '  %d) [%s] %s\n' "$((i + 1))" "$score" "$path" >&2
+    fi
+  done
+}
+
+prompt_candidate_selection() {
+  local kind_label="$1"
+  local allow_skip="$2"
+  local current="$3"
+  local -n candidates="$4"
+  local choice=""
+  local score
+  local path
+  local max_index="${#candidates[@]}"
+
+  while true; do
+    if (( max_index > 0 )); then
+      if (( allow_skip == 1 )); then
+        echo "Choose $kind_label [1-$max_index, absolute path, enter to keep current, s to skip]:" >&2
+      else
+        echo "Choose $kind_label [1-$max_index, absolute path, enter to keep current]:" >&2
+      fi
+    else
+      if (( allow_skip == 1 )); then
+        echo "Choose $kind_label [absolute path, enter to keep current, s to skip]:" >&2
+      else
+        echo "Choose $kind_label [absolute path, enter to keep current]:" >&2
+      fi
+    fi
+    read -r -p "> " choice
+    case "${choice,,}" in
+      "")
+        printf '%s' "$current"
+        return
+        ;;
+      s|skip|none)
+        if (( allow_skip == 1 )); then
+          printf '%s' ""
+          return
+        fi
+        warn_line "Skipping is not allowed for $kind_label." >&2
+        ;;
+      *[!0-9]*)
+        if [[ "$choice" == /* && -e "$choice" ]]; then
+          case "$kind_label" in
+            executable)
+              if [[ -x "$choice" && -f "$choice" ]]; then
+                printf '%s' "$choice"
+                return
+              fi
+              warn_line "That path is not an executable file."
+              ;;
+            "desktop file")
+              if [[ -f "$choice" ]]; then
+                printf '%s' "$choice"
+                return
+              fi
+              warn_line "That path is not a desktop file."
+              ;;
+            icon)
+              if [[ -f "$choice" ]]; then
+                printf '%s' "$choice"
+                return
+              fi
+              warn_line "That path is not an icon file."
+              ;;
+            *)
+              error_line "Unsupported selection kind."
+              return 1
+              ;;
+          esac
+          continue
+        fi
+        warn_line "Please enter a number or an absolute path."
+        ;;
+      *)
+        if (( max_index > 0 )) && (( choice >= 1 && choice <= max_index )); then
+          IFS=$'\t' read -r score path <<< "${candidates[$((choice - 1))]}"
+          printf '%s' "$path"
+          return
+        fi
+        if (( max_index > 0 )); then
+          warn_line "Please choose a number from 1 to $max_index."
+        else
+          warn_line "Please enter an absolute path, or press enter to keep the current value."
+        fi
+        ;;
+    esac
+  done
+}
+
+review_install_choices() {
+  local -n exec_candidates="$1"
+  local -n desktop_candidates="$2"
+  local -n icon_candidates="$3"
+  local -n selected_exec="$4"
+  local -n selected_desktop="$5"
+  local -n selected_icon="$6"
+  local selection
+
+  while true; do
+    print_candidate_block "Executable candidates" exec_candidates "$selected_exec"
+    print_candidate_block "Desktop file candidates" desktop_candidates "$selected_desktop"
+    print_candidate_block "Icon candidates" icon_candidates "$selected_icon"
+    printf '%b%s%b\n' "${C_BOLD}${C_CYAN}" "Selected defaults:" "$C_RESET" >&2
+    printf '  Executable: %b%s%b\n' "$C_GREEN" "${selected_exec:-<none>}" "$C_RESET" >&2
+    printf '  Desktop file: %b%s%b\n' "$C_GREEN" "${selected_desktop:-<generate>}" "$C_RESET" >&2
+    printf '  Icon: %b%s%b\n' "$C_GREEN" "${selected_icon:-<none>}" "$C_RESET" >&2
+
+    if [[ ! -t 0 ]]; then
+      return
+    fi
+
+    status_line "Proceed with these choices? [c]onfirm, [e]dit, [x]cancel" >&2
+    read -r -p "$(prompt_text '> ')" selection
+    case "${selection,,}" in
+      c|confirm|y|yes|"")
+        return
+        ;;
+      x|cancel|n|no)
+        echo "Cancelled."
+        exit 1
+        ;;
+      e|edit)
+        selected_exec="$(prompt_candidate_selection "executable" 0 "$selected_exec" exec_candidates)"
+        selected_desktop="$(prompt_candidate_selection "desktop file" 1 "$selected_desktop" desktop_candidates)"
+        selected_icon="$(prompt_candidate_selection "icon" 1 "$selected_icon" icon_candidates)"
+        ;;
+      *)
+        warn_line "Please type c, e, or x."
+        ;;
+    esac
+  done
+}
+
 write_desktop_from_vendor() {
   # Writes a desktop file based on vendor file, but overwrites the keys judo manages.
   local vendor="$1"
@@ -589,99 +959,130 @@ write_desktop_from_vendor() {
 }
 
 refresh_name_paths
+if [[ -d "$SOURCE_INPUT" ]]; then
+  SOURCE_IS_DIRECTORY=1
+  SOURCE_ROOT="$(cd "$SOURCE_INPUT" && pwd -P)"
+fi
 resolve_name_conflicts
-download_archive_if_url "$ARCHIVE_INPUT"
+download_archive_if_url "$SOURCE_INPUT"
 
-echo "Preparing temporary extraction dir..."
-rm -rf "$TEMP_DIR"
-mkdir -p "$TEMP_DIR"
+if (( SOURCE_IS_DIRECTORY == 1 )); then
+  info_line "Using directory source tree: $SOURCE_ROOT"
+else
+  info_line "Preparing temporary extraction dir..."
+  rm -rf "$TEMP_DIR"
+  mkdir -p "$TEMP_DIR"
 
-preflight_archive_type "$ARCHIVE"
+  preflight_archive_type "$ARCHIVE"
 
-echo "Extracting $ARCHIVE..."
-extract_archive "$ARCHIVE"
+  info_line "Extracting $ARCHIVE..."
+  extract_archive "$ARCHIVE"
+  SOURCE_ROOT="$TEMP_DIR"
+fi
 
-echo "Looking for executable..."
-EXECUTABLE="$(pick_best_executable "$TEMP_DIR")"
-if [[ -z "$EXECUTABLE" ]]; then
-  if looks_like_windows_bundle "$TEMP_DIR"; then
-    echo "This archive looks like a Windows-only bundle (for example .exe/.dll files) and does not contain a native Linux executable."
-    echo "Use a Linux release, AppImage, or source archive instead."
+status_line "Looking for executable..."
+EXECUTABLE_HINT="$(pick_best_executable "$SOURCE_ROOT")"
+if [[ -z "$EXECUTABLE_HINT" ]]; then
+  if looks_like_windows_bundle "$SOURCE_ROOT"; then
+    error_line "This archive looks like a Windows-only bundle (for example .exe/.dll files) and does not contain a native Linux executable."
+    error_line "Use a Linux release, AppImage, or source archive instead."
   else
-    echo "No executable found"
+    error_line "No executable found"
   fi
   exit 1
 fi
-echo "Found executable: $EXECUTABLE"
+success_line "Found executable: $EXECUTABLE_HINT"
 
-echo "Finding icon..."
-ICON="$(find "$TEMP_DIR" -type f \( -name "*.png" -o -name "*.svg" -o -name "*.xpm" \) | head -1 || true)"
-echo "Found icon: ${ICON:-<none>}"
+if (( SOURCE_IS_DIRECTORY == 0 )); then
+  info_line "Staging install in: $STAGE_DIR"
+  sudo rm -rf "$STAGE_DIR"
+  sudo mkdir -p "$STAGE_DIR"
 
-echo "Staging install in: $STAGE_DIR"
-sudo rm -rf "$STAGE_DIR"
-sudo mkdir -p "$STAGE_DIR"
-
-determine_stage_source
-sudo cp -a "$STAGE_SOURCE"/. "$STAGE_DIR"/
-
-if [[ -n "${ICON:-}" && "$ICON" != "$STAGE_SOURCE"/* ]]; then
-  sudo cp -a "$ICON" "$STAGE_DIR"/
-  ICON="$STAGE_DIR/$(basename "$ICON")"
-fi
-
-# Find final executable path inside staging
-FINAL_EXECUTABLE="$(pick_best_executable "$STAGE_DIR")"
-[[ -z "${FINAL_EXECUTABLE:-}" ]] && echo "No executable found after staging" && exit 1
-sudo chmod +x "$FINAL_EXECUTABLE"
-echo "Staged executable: $FINAL_EXECUTABLE"
-
-# If icon not found yet, look in staging
-if [[ -z "${ICON:-}" ]]; then
-  ICON="$(find "$STAGE_DIR" -type f \( -name "*.png" -o -name "*.svg" -o -name "*.xpm" \) | head -1 || true)"
-fi
-
-# Prepare icon entry (and install to pixmaps best-effort)
-if [[ -n "${ICON:-}" ]]; then
-  ICON_NAME="$(basename "$ICON")"
-  sudo cp "$ICON" "/usr/share/pixmaps/$ICON_NAME" 2>/dev/null || true
-  ICON_ENTRY="Icon=$ICON_NAME"
+  determine_stage_source "$SOURCE_ROOT"
+  sudo cp -a "$STAGE_SOURCE"/. "$STAGE_DIR"/
+  WORK_ROOT="$STAGE_DIR"
 else
-  ICON_ENTRY="Icon=$APP_NAME"
+  info_line "Keeping source tree in place; skipping /opt staging..."
+  WORK_ROOT="$SOURCE_ROOT"
 fi
 
-# Pick vendor desktop file (from staging), keep relative path for after /opt move
-VENDOR_DESKTOP_STAGE="$(pick_best_desktop_file "$STAGE_DIR" || true)"
-VENDOR_DESKTOP_REL=""
-if [[ -n "${VENDOR_DESKTOP_STAGE:-}" ]]; then
-  VENDOR_DESKTOP_REL="${VENDOR_DESKTOP_STAGE#"$STAGE_DIR"/}"
-  echo "Found vendor desktop file: $VENDOR_DESKTOP_REL"
+collect_top_candidates 10 "$WORK_ROOT" exec EXEC_CANDIDATES
+collect_top_candidates 10 "$WORK_ROOT" desktop DESKTOP_CANDIDATES
+collect_top_candidates 10 "$WORK_ROOT" icon ICON_CANDIDATES
+
+SELECTED_EXECUTABLE="$EXECUTABLE_HINT"
+if (( ${#EXEC_CANDIDATES[@]} > 0 )); then
+  IFS=$'\t' read -r _ SELECTED_EXECUTABLE <<< "${EXEC_CANDIDATES[0]}"
+fi
+
+SELECTED_DESKTOP_FILE=""
+if (( ${#DESKTOP_CANDIDATES[@]} > 0 )); then
+  IFS=$'\t' read -r _ SELECTED_DESKTOP_FILE <<< "${DESKTOP_CANDIDATES[0]}"
+fi
+
+SELECTED_ICON=""
+if (( ${#ICON_CANDIDATES[@]} > 0 )); then
+  IFS=$'\t' read -r _ SELECTED_ICON <<< "${ICON_CANDIDATES[0]}"
+fi
+
+review_install_choices EXEC_CANDIDATES DESKTOP_CANDIDATES ICON_CANDIDATES SELECTED_EXECUTABLE SELECTED_DESKTOP_FILE SELECTED_ICON
+
+if (( SOURCE_IS_DIRECTORY == 0 )); then
+  info_line "Replacing install directory under /opt..."
+  if sudo test -e "$INSTALL_DIR"; then
+    warn_line "Existing install found; backing up to: $BACKUP_DIR"
+    sudo rm -rf "$BACKUP_DIR"
+    sudo mv "$INSTALL_DIR" "$BACKUP_DIR"
+  fi
+  sudo mv "$STAGE_DIR" "$INSTALL_DIR"
+  FINAL_ROOT="$INSTALL_DIR"
 else
-  echo "No vendor desktop file found; will generate one."
+  FINAL_ROOT="$SOURCE_ROOT"
 fi
 
-echo "Replacing install directory under /opt..."
-if sudo test -e "$INSTALL_DIR"; then
-  echo "Existing install found; backing up to: $BACKUP_DIR"
-  sudo rm -rf "$BACKUP_DIR"
-  sudo mv "$INSTALL_DIR" "$BACKUP_DIR"
+resolve_selected_path() {
+  local selected="$1"
+  local work_root="$2"
+  local final_root="$3"
+
+  if [[ -z "$selected" ]]; then
+    printf '%s' ""
+    return
+  fi
+
+  if [[ "$selected" == "$work_root"/* ]]; then
+    printf '%s' "$final_root/${selected#"$work_root"/}"
+  else
+    printf '%s' "$selected"
+  fi
+}
+
+FINAL_EXECUTABLE="$(resolve_selected_path "$SELECTED_EXECUTABLE" "$WORK_ROOT" "$FINAL_ROOT")"
+FINAL_DESKTOP_VENDOR="$(resolve_selected_path "$SELECTED_DESKTOP_FILE" "$WORK_ROOT" "$FINAL_ROOT")"
+FINAL_ICON="$(resolve_selected_path "$SELECTED_ICON" "$WORK_ROOT" "$FINAL_ROOT")"
+
+if [[ -n "$FINAL_EXECUTABLE" && "$SOURCE_IS_DIRECTORY" -eq 0 && "$FINAL_EXECUTABLE" == "$FINAL_ROOT"/* ]]; then
+  sudo chmod +x "$FINAL_EXECUTABLE" 2>/dev/null || true
 fi
-sudo mv "$STAGE_DIR" "$INSTALL_DIR"
 
-# Re-select executable inside final install dir
-FINAL_EXECUTABLE_FINAL="$(pick_best_executable "$INSTALL_DIR")"
-[[ -z "${FINAL_EXECUTABLE_FINAL:-}" ]] && echo "No executable found after final install" && exit 1
-
-echo "Creating desktop file..."
+info_line "Creating desktop file..."
 sudo -u "$USER_NAME" mkdir -p "$(dirname "$DESKTOP_FILE")"
 
 DESKTOP_CATEGORIES="Network;"
+ICON_ENTRY="Icon=$APP_NAME"
 
-if [[ -n "${VENDOR_DESKTOP_REL:-}" && -f "$INSTALL_DIR/$VENDOR_DESKTOP_REL" ]]; then
-  VENDOR_DESKTOP_FINAL="$INSTALL_DIR/$VENDOR_DESKTOP_REL"
+if [[ -n "${FINAL_ICON:-}" ]]; then
+  if (( SOURCE_IS_DIRECTORY == 0 )); then
+    ICON_NAME="$(basename "$FINAL_ICON")"
+    sudo cp "$FINAL_ICON" "/usr/share/pixmaps/$ICON_NAME" 2>/dev/null || true
+    ICON_ENTRY="Icon=$ICON_NAME"
+  else
+    ICON_ENTRY="Icon=$FINAL_ICON"
+  fi
+fi
 
-  # Preserve vendor Exec arguments/field-codes by keeping the suffix after the first token.
-  vendor_exec_raw="$(grep -m1 '^Exec=' "$VENDOR_DESKTOP_FINAL" 2>/dev/null | cut -d= -f2- || true)"
+if [[ -n "${FINAL_DESKTOP_VENDOR:-}" && -f "$FINAL_DESKTOP_VENDOR" ]]; then
+  vendor_exec_raw="$(grep -m1 '^Exec=' "$FINAL_DESKTOP_VENDOR" 2>/dev/null | cut -d= -f2- || true)"
   suffix=""
   if [[ "$vendor_exec_raw" =~ ^\"[^\"]+\"[[:space:]]+(.*)$ ]]; then
     suffix="${BASH_REMATCH[1]}"
@@ -689,24 +1090,23 @@ if [[ -n "${VENDOR_DESKTOP_REL:-}" && -f "$INSTALL_DIR/$VENDOR_DESKTOP_REL" ]]; 
     suffix="${vendor_exec_raw#* }"
   fi
 
-  EXEC_LINE="$FINAL_EXECUTABLE_FINAL"
+  EXEC_LINE="$FINAL_EXECUTABLE"
   [[ -n "$suffix" ]] && EXEC_LINE="$EXEC_LINE $suffix"
 
-  # If we didn't find an icon ourselves, prefer vendor Icon= over the fallback.
-  vendor_icon_line="$(grep -m1 '^Icon=' "$VENDOR_DESKTOP_FINAL" 2>/dev/null || true)"
+  vendor_icon_line="$(grep -m1 '^Icon=' "$FINAL_DESKTOP_VENDOR" 2>/dev/null || true)"
   if [[ "$ICON_ENTRY" == "Icon=$APP_NAME" && -n "$vendor_icon_line" ]]; then
     ICON_ENTRY="$vendor_icon_line"
   fi
 
-  if write_desktop_from_vendor "$VENDOR_DESKTOP_FINAL" "$TMP_DESKTOP" "$APP_NAME" "$EXEC_LINE" "$ICON_ENTRY" "$DESKTOP_CATEGORIES"; then
+  if write_desktop_from_vendor "$FINAL_DESKTOP_VENDOR" "$TMP_DESKTOP" "$APP_NAME" "$EXEC_LINE" "$ICON_ENTRY" "$DESKTOP_CATEGORIES"; then
     sudo -u "$USER_NAME" install -m 644 "$TMP_DESKTOP" "$DESKTOP_FILE"
   else
-    echo "Vendor desktop file unusable; falling back to generated desktop file."
+    warn_line "Vendor desktop file unusable; falling back to generated desktop file."
     sudo -u "$USER_NAME" cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Version=1.0
 Name=$APP_NAME
-Exec=$FINAL_EXECUTABLE_FINAL
+Exec=$FINAL_EXECUTABLE
 $ICON_ENTRY
 Terminal=false
 Type=Application
@@ -718,7 +1118,7 @@ else
 [Desktop Entry]
 Version=1.0
 Name=$APP_NAME
-Exec=$FINAL_EXECUTABLE_FINAL
+Exec=$FINAL_EXECUTABLE
 $ICON_ENTRY
 Terminal=false
 Type=Application
@@ -726,13 +1126,15 @@ Categories=$DESKTOP_CATEGORIES
 EOF
 fi
 
-echo "Creating symlink in ~/.local/bin..."
+info_line "Creating symlink in ~/.local/bin..."
 sudo -u "$USER_NAME" mkdir -p "$LOCAL_BIN_DIR"
-sudo -u "$USER_NAME" ln -sf "$FINAL_EXECUTABLE_FINAL" "$SYMLINK_PATH"
+sudo -u "$USER_NAME" ln -sf "$FINAL_EXECUTABLE" "$SYMLINK_PATH"
 
-echo "=== INSTALLATION COMPLETE ==="
-echo "Application: $FINAL_EXECUTABLE_FINAL"
-echo "Desktop file: $DESKTOP_FILE"
-echo "Symlink: $SYMLINK_PATH"
-echo "Backup (if any): $BACKUP_DIR"
-echo "Test command: ${APP_NAME,,}"	
+success_line "=== INSTALLATION COMPLETE ==="
+printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Application:" "$C_RESET" "$FINAL_EXECUTABLE"
+printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Desktop file:" "$C_RESET" "$DESKTOP_FILE"
+printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Symlink:" "$C_RESET" "$SYMLINK_PATH"
+if (( SOURCE_IS_DIRECTORY == 0 )); then
+  printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Backup (if any):" "$C_RESET" "$BACKUP_DIR"
+fi
+printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Test command:" "$C_RESET" "${APP_NAME,,}"
