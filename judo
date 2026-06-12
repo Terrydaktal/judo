@@ -1,15 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 
+JUDO_VERSION="0.1.3"
+
 usage() {
-  cat <<'EOF'
+  cat <<EOF
+judo ${JUDO_VERSION}
+
 judo installs a self-contained application from either an archive, a URL, or a directory by extracting or inspecting it, heuristically selecting the most likely main executable, and then either keeping the source tree in place or copying the application files into /opt/<AppName>. It always creates a per-user desktop launcher in ~/.local/share/applications and a per-user command symlink in ~/.local/bin (lowercased). Archive installs are safe to re-run: each run clears the temporary extraction directory, stages the install under /opt, and replaces any existing /opt/<AppName> with a timestamped backup.
 
 Usage:
-  judo [--force] <source-path-or-url> <AppName>
+  judo [--force] <source-archive-directory-or-url> <AppName>
 
 Arguments:
-  <source-path-or-url>
+  <source-archive-directory-or-url>
               Archive path, directory path, or http(s) URL to install
               (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .tar.zst/.tzst,
                .pkg.tar.zst, .zip, .deb, .rpm, or a folder containing a project or extracted archive)
@@ -65,9 +69,10 @@ Notes:
   - The symlink and desktop file names are derived from <AppName> but are lowercased.
   - Ensure ~/.local/bin is on your PATH to run <appname> from the terminal.
   - If generated names already exist, judo asks whether to overwrite, use a new name, or cancel.
-    Archive installs include /opt/<AppName>; directory installs only check the desktop file and ~/.local/bin symlink.
-  - If <source-path-or-url> starts with http:// or https://, judo downloads it using curl -L first.
-  - If <source-path-or-url> is a directory, judo uses it directly as the source tree.
+    Archive installs include /opt/<AppName>; all installs also check the desktop file,
+    ~/.local/bin symlink, and any generated icon under ~/.local/share/icons/judo/<appname>.*.
+  - If <source-archive-directory-or-url> starts with http:// or https://, judo downloads it using curl -L first.
+  - If <source-archive-directory-or-url> is a directory, judo uses it directly as the source tree.
   - For .deb/.rpm input, judo extracts package payload only, then installs from that tree.
 EOF
 }
@@ -81,6 +86,10 @@ while (( $# > 0 )); do
       ;;
     -h|--help)
       usage
+      exit 0
+      ;;
+    -V|--version)
+      printf 'judo %s\n' "$JUDO_VERSION"
       exit 0
       ;;
     --)
@@ -114,6 +123,7 @@ SOURCE_IS_DIRECTORY=0
 USER_NAME="$(logname)"
 USER_HOME="$(eval echo "~${USER_NAME}")"
 LOCAL_BIN_DIR="${USER_HOME}/.local/bin"
+LOCAL_ICON_DIR="${USER_HOME}/.local/share/icons/judo"
 
 COLOR_ENABLED=0
 if [[ -z "${NO_COLOR:-}" && ( -t 0 || -t 1 || -t 2 ) ]]; then
@@ -179,6 +189,7 @@ refresh_name_paths() {
   STAGE_DIR="/opt/.${APP_NAME}.staging.$$"
   BACKUP_DIR="/opt/.${APP_NAME}.backup.$(date +%Y%m%d-%H%M%S)"
   SYMLINK_PATH="${LOCAL_BIN_DIR}/${APP_NAME,,}"
+  USER_ICON_STEM="${LOCAL_ICON_DIR}/${APP_NAME,,}"
 }
 
 TMP_DESKTOP="$(mktemp)"
@@ -194,6 +205,7 @@ trap cleanup EXIT
 
 find_name_conflicts() {
   NAME_CONFLICTS=()
+  local icon_ext
 
   if (( SOURCE_IS_DIRECTORY == 0 )) && [[ -e "$INSTALL_DIR" ]]; then
     NAME_CONFLICTS+=("Install path exists: $INSTALL_DIR")
@@ -208,6 +220,11 @@ find_name_conflicts() {
       NAME_CONFLICTS+=("Local bin entry exists and is not a symlink: $SYMLINK_PATH")
     fi
   fi
+  for icon_ext in png svg xpm ico; do
+    if [[ -e "${USER_ICON_STEM}.${icon_ext}" ]]; then
+      NAME_CONFLICTS+=("User icon exists: ${USER_ICON_STEM}.${icon_ext}")
+    fi
+  done
 }
 
 validate_app_name() {
@@ -1186,9 +1203,17 @@ ICON_ENTRY="Icon=$APP_NAME"
 
 if [[ -n "${FINAL_ICON:-}" ]]; then
   if [[ -f "$FINAL_ICON" ]] && (( SOURCE_IS_DIRECTORY == 0 )); then
-    ICON_NAME="$(basename "$FINAL_ICON")"
-    sudo cp "$FINAL_ICON" "/usr/share/pixmaps/$ICON_NAME" 2>/dev/null || true
-    ICON_ENTRY="Icon=$ICON_NAME"
+    ICON_EXT="${FINAL_ICON##*.}"
+    ICON_EXT="${ICON_EXT,,}"
+    USER_ICON_PATH="${LOCAL_ICON_DIR}/${APP_NAME,,}.${ICON_EXT}"
+    sudo -u "$USER_NAME" mkdir -p "$LOCAL_ICON_DIR"
+    sudo -u "$USER_NAME" rm -f \
+      "${LOCAL_ICON_DIR}/${APP_NAME,,}.png" \
+      "${LOCAL_ICON_DIR}/${APP_NAME,,}.svg" \
+      "${LOCAL_ICON_DIR}/${APP_NAME,,}.xpm" \
+      "${LOCAL_ICON_DIR}/${APP_NAME,,}.ico"
+    sudo -u "$USER_NAME" install -m 644 "$FINAL_ICON" "$USER_ICON_PATH"
+    ICON_ENTRY="Icon=$USER_ICON_PATH"
   else
     ICON_ENTRY="Icon=$FINAL_ICON"
   fi

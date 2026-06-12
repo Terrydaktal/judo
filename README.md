@@ -2,6 +2,8 @@
 
 `judo` installs self-contained Linux applications from archives, package payloads, URLs, or local directories.
 
+Current script version: `0.1.3`
+
 It extracts or inspects the input, picks the most likely main executable, and then either installs the app under `/opt/<AppName>` for archive inputs or keeps the source tree in place for directory inputs. In both cases it creates a user desktop launcher and a user command symlink in `~/.local/bin`.
 
 ## What It Does
@@ -9,16 +11,22 @@ It extracts or inspects the input, picks the most likely main executable, and th
 Given:
 
 ```bash
-judo [--force] <source-path-or-url> <AppName>
+judo [--force] <source-archive-directory-or-url> <AppName>
+```
+
+Version:
+
+```bash
+judo --version
 ```
 
 it will:
 
 1. Resolve name conflicts for `~/.local/share/applications/<appname>.desktop` and `~/.local/bin/<appname>` in all cases, and also `/opt/<AppName>` for archive inputs.
-2. If input is an `http://` / `https://` URL, download it with `curl -L` first.
+2. If input is an `http://` / `https://` URL, download it with `curl -L` first and then continue using the downloaded archive file.
 3. If input is a directory, use it directly as the source tree and skip archive extraction and `/opt` staging.
-4. For archive inputs, prepare a clean extraction directory at `/tmp/<AppName>-extract`.
-5. Extract the archive payload into that temp tree (tar/zip/package payload extraction depending on format).
+4. If input is a local archive path, or a URL that was just downloaded, prepare a clean extraction directory at `/tmp/<AppName>-extract`.
+5. Extract that archive payload into the temp tree using the handler for its format (tar/zip/package payload extraction depending on format).
 6. Score executable candidates and choose the best match for `<AppName>`.
 7. Find an icon candidate if one exists.
 8. For archive inputs, choose a staging source tree from extracted content and stage files under `/opt/.<AppName>.staging.<pid>`.
@@ -39,7 +47,7 @@ Staging in `/opt/.<AppName>.staging.<pid>` is intentional for archive inputs:
 ## Requirements
 
 - Linux with Bash
-- `sudo` privileges for archive installs (writes under `/opt` and optionally `/usr/share/pixmaps`)
+- `sudo` privileges for archive installs (writes under `/opt`)
 - `tar`
 - `file`
 - `find`, `awk`, `grep`, `install`
@@ -85,7 +93,7 @@ sudo install -m 755 ./judo /usr/local/bin/judo
 ## Usage
 
 ```bash
-judo [--force] <source-path-or-url> <AppName>
+judo [--force] <source-archive-directory-or-url> <AppName>
 ```
 
 Examples:
@@ -108,6 +116,7 @@ Before installation work, `judo` checks for existing generated targets:
 - `/opt/<AppName>`
 - `~/.local/share/applications/<appname>.desktop`
 - `~/.local/bin/<appname>` (symlink or regular file)
+- `~/.local/share/icons/judo/<appname>.*`
 
 If conflicts exist:
 
@@ -154,7 +163,7 @@ If no usable vendor file exists, `judo` generates a minimal desktop entry.
 - `judo` prints the desktop file, executable, and icon candidates in that order, auto-selects the top choice for each, and then stops for a final confirm/edit/cancel prompt
 - In the edit step, you can override any of the three by number or by absolute path
 - If a selected desktop file contains a resolvable `Icon=` value, that icon appears in the icon shortlist as a desktop-file-derived candidate with its resolved absolute path
-- Archive input: best-effort copy to `/usr/share/pixmaps/<icon>` and the desktop file uses the icon basename
+- Archive input: copies the selected icon into `~/.local/share/icons/judo/<appname>.<ext>` and the desktop file uses that absolute path
 - Directory input: the desktop file points to the icon where it already lives inside the source tree
 - Vendor `Icon=<name>` entries are only preserved when that icon name resolves in the installed icon themes or pixmap directories
 - If no icon is found, the desktop file falls back to `Icon=<AppName>`
@@ -169,6 +178,7 @@ For `judo app.tar.xz MyApp`:
 
 - Install: `/opt/MyApp`
 - Temp extract: `/tmp/MyApp-extract`
+- Icon copy: `~/.local/share/icons/judo/myapp.<ext>`
 - Desktop: `~/.local/share/applications/myapp.desktop`
 - Symlink: `~/.local/bin/myapp`
 - Backup (if replaced): `/opt/.MyApp.backup.YYYYMMDD-HHMMSS`
