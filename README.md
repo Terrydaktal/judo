@@ -12,6 +12,7 @@ Given:
 
 ```bash
 judo [--force] <source-archive-directory-or-url> <AppName>
+judo uninstall <AppName>
 ```
 
 Version:
@@ -35,6 +36,7 @@ it will:
 11. If you edit, you can choose an executable, desktop file, or icon by number or by absolute path.
 12. Reuse or generate a desktop file and set managed keys (`Name`, `Exec`, `Icon`, etc.).
 13. Create/update `~/.local/share/applications/<appname>.desktop` and `~/.local/bin/<appname>`.
+14. For `judo uninstall <AppName>`, remove the generated desktop file, launcher symlink, and any `~/.local/share/icons/judo/<appname>.*` icon. Remove `/opt/<AppName>` only when that install directory exists; leave source trees outside `/opt` in place.
 
 Staging in `/opt/.<AppName>.staging.<pid>` is intentional for archive inputs:
 
@@ -94,6 +96,7 @@ sudo install -m 755 ./judo /usr/local/bin/judo
 
 ```bash
 judo [--force] <source-archive-directory-or-url> <AppName>
+judo uninstall <AppName>
 ```
 
 Examples:
@@ -107,6 +110,7 @@ judo ~/Downloads/example.tar.zst Example
 judo ~/Downloads/example.rpm Example
 judo ~/src/copyq copyq
 judo --force ~/Downloads/Telegram.tar.xz Telegram
+judo uninstall Telegram
 ```
 
 ## Name Collision Handling

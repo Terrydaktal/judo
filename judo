@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-JUDO_VERSION="0.1.3"
+JUDO_VERSION="0.1.4"
 
 usage() {
   cat <<EOF
@@ -11,6 +11,7 @@ judo installs a self-contained application from either an archive, a URL, or a d
 
 Usage:
   judo [--force] <source-archive-directory-or-url> <AppName>
+  judo uninstall <AppName>
 
 Arguments:
   <source-archive-directory-or-url>
@@ -18,6 +19,15 @@ Arguments:
               (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .tar.zst/.tzst,
                .pkg.tar.zst, .zip, .deb, .rpm, or a folder containing a project or extracted archive)
   <AppName>   Logical application name used for naming paths and selecting an executable.
+
+Uninstall:
+  uninstall   Remove judo-managed integration for <AppName>.
+              Deletes:
+                ~/.local/share/applications/<appname>.desktop
+                ~/.local/bin/<appname>
+                ~/.local/share/icons/judo/<appname>.*
+              If /opt/<AppName> exists, it is removed too. If the executable points outside /opt,
+              judo leaves the original source tree alone.
 
 What it creates (derived from <AppName>):
   Archive install directory:
@@ -78,11 +88,17 @@ EOF
 }
 
 FORCE=0
+MODE="install"
 while (( $# > 0 )); do
   case "$1" in
     --force)
       FORCE=1
       shift
+      ;;
+    uninstall)
+      MODE="uninstall"
+      shift
+      break
       ;;
     -h|--help)
       usage
@@ -107,14 +123,9 @@ while (( $# > 0 )); do
   esac
 done
 
-if (( $# != 2 )); then
-  usage
-  exit 1
-fi
-
-SOURCE_INPUT="$1"
-APP_NAME="$2"
-ARCHIVE="$SOURCE_INPUT"
+SOURCE_INPUT=""
+APP_NAME=""
+ARCHIVE=""
 DOWNLOADED_ARCHIVE=""
 DEB_WORK_DIR=""
 SOURCE_ROOT=""
@@ -124,6 +135,7 @@ USER_NAME="$(logname)"
 USER_HOME="$(eval echo "~${USER_NAME}")"
 LOCAL_BIN_DIR="${USER_HOME}/.local/bin"
 LOCAL_ICON_DIR="${USER_HOME}/.local/share/icons/judo"
+SYSTEM_RM="/bin/rm"
 
 COLOR_ENABLED=0
 if [[ -z "${NO_COLOR:-}" && ( -t 0 || -t 1 || -t 2 ) ]]; then
@@ -192,16 +204,106 @@ refresh_name_paths() {
   USER_ICON_STEM="${LOCAL_ICON_DIR}/${APP_NAME,,}"
 }
 
+resolve_uninstall_target() {
+  if [[ -L "$SYMLINK_PATH" ]]; then
+    readlink -f "$SYMLINK_PATH" 2>/dev/null || true
+    return
+  fi
+
+  if [[ -f "$DESKTOP_FILE" ]]; then
+    awk -F= '
+      /^Exec=/ {
+        exec=$2
+        sub(/^"/, "", exec)
+        sub(/".*$/, "", exec)
+        sub(/[[:space:]].*$/, "", exec)
+        print exec
+        exit
+      }
+    ' "$DESKTOP_FILE" 2>/dev/null || true
+  fi
+}
+
+uninstall_app() {
+  local target_path=""
+  local icon_ext
+  local removed_any=0
+
+  info_line "Uninstalling $APP_NAME..."
+
+  if [[ -e "$DESKTOP_FILE" ]]; then
+    info_line "Removing desktop file: $DESKTOP_FILE"
+    sudo -u "$USER_NAME" "$SYSTEM_RM" -f "$DESKTOP_FILE"
+    removed_any=1
+  fi
+
+  if [[ -e "$SYMLINK_PATH" ]]; then
+    info_line "Removing launcher: $SYMLINK_PATH"
+    sudo -u "$USER_NAME" "$SYSTEM_RM" -f "$SYMLINK_PATH"
+    removed_any=1
+  fi
+
+  for icon_ext in png svg xpm ico; do
+    if [[ -e "${USER_ICON_STEM}.${icon_ext}" ]]; then
+      info_line "Removing icon: ${USER_ICON_STEM}.${icon_ext}"
+      sudo -u "$USER_NAME" "$SYSTEM_RM" -f "${USER_ICON_STEM}.${icon_ext}"
+      removed_any=1
+    fi
+  done
+
+  target_path="$(resolve_uninstall_target)"
+  if [[ -e "$INSTALL_DIR" ]]; then
+    info_line "Removing install directory: $INSTALL_DIR"
+    sudo rm -rf "$INSTALL_DIR"
+    removed_any=1
+  elif [[ -n "$target_path" ]]; then
+    if [[ "$target_path" == "$INSTALL_DIR" || "$target_path" == "$INSTALL_DIR"/* ]]; then
+      info_line "Removing install directory: $INSTALL_DIR"
+      sudo rm -rf "$INSTALL_DIR"
+      removed_any=1
+    else
+      info_line "Executable is outside /opt; leaving source tree in place: $target_path"
+    fi
+  fi
+
+  if (( removed_any == 0 )); then
+    warn_line "Nothing to remove for '$APP_NAME'."
+    return
+  fi
+
+  success_line "=== UNINSTALL COMPLETE ==="
+  printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Desktop file:" "$C_RESET" "$DESKTOP_FILE"
+  printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Symlink:" "$C_RESET" "$SYMLINK_PATH"
+  printf '%b%s%b %s.*\n' "${C_BOLD}${C_GREEN}" "Icon stem:" "$C_RESET" "$USER_ICON_STEM"
+  printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Install dir:" "$C_RESET" "$INSTALL_DIR"
+}
+
 TMP_DESKTOP="$(mktemp)"
 
 cleanup() {
-  rm -rf "$TEMP_DIR" "/tmp/${APP_NAME}-best-exec" 2>/dev/null || true
-  rm -rf "$DEB_WORK_DIR" 2>/dev/null || true
-  rm -f "$TMP_DESKTOP" 2>/dev/null || true
-  rm -f "$DOWNLOADED_ARCHIVE" 2>/dev/null || true
+  "$SYSTEM_RM" -rf "$TEMP_DIR" "/tmp/${APP_NAME}-best-exec" 2>/dev/null || true
+  "$SYSTEM_RM" -rf "$DEB_WORK_DIR" 2>/dev/null || true
+  "$SYSTEM_RM" -f "$TMP_DESKTOP" 2>/dev/null || true
+  "$SYSTEM_RM" -f "$DOWNLOADED_ARCHIVE" 2>/dev/null || true
   sudo rm -rf "$STAGE_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+if [[ "$MODE" == "uninstall" ]]; then
+  if (( $# != 1 )); then
+    usage
+    exit 1
+  fi
+  APP_NAME="$1"
+else
+  if (( $# != 2 )); then
+    usage
+    exit 1
+  fi
+  SOURCE_INPUT="$1"
+  APP_NAME="$2"
+  ARCHIVE="$SOURCE_INPUT"
+fi
 
 find_name_conflicts() {
   NAME_CONFLICTS=()
@@ -493,6 +595,7 @@ pick_best_executable() {
 }
 
 determine_stage_source() {
+  local executable_path="$1"
   local rel_path
   local top_dir
   local top_entries=()
@@ -507,9 +610,9 @@ determine_stage_source() {
     return
   fi
 
-  rel_path="${EXECUTABLE#"$TEMP_DIR"/}"
+  rel_path="${executable_path#"$TEMP_DIR"/}"
   top_dir="${rel_path%%/*}"
-  if [[ "$rel_path" != "$EXECUTABLE" && -n "$top_dir" && -d "$TEMP_DIR/$top_dir" ]]; then
+  if [[ "$rel_path" != "$executable_path" && -n "$top_dir" && -d "$TEMP_DIR/$top_dir" ]]; then
     STAGE_SOURCE="$TEMP_DIR/$top_dir"
     info_line "Detected grouped layout; staging from: $STAGE_SOURCE"
     return
@@ -1093,6 +1196,12 @@ write_desktop_from_vendor() {
 }
 
 refresh_name_paths
+
+if [[ "$MODE" == "uninstall" ]]; then
+  uninstall_app
+  exit 0
+fi
+
 if [[ -d "$SOURCE_INPUT" ]]; then
   SOURCE_IS_DIRECTORY=1
   SOURCE_ROOT="$(cd "$SOURCE_INPUT" && pwd -P)"
@@ -1104,7 +1213,7 @@ if (( SOURCE_IS_DIRECTORY == 1 )); then
   info_line "Using directory source tree: $SOURCE_ROOT"
 else
   info_line "Preparing temporary extraction dir..."
-  rm -rf "$TEMP_DIR"
+  "$SYSTEM_RM" -rf "$TEMP_DIR"
   mkdir -p "$TEMP_DIR"
 
   preflight_archive_type "$ARCHIVE"
@@ -1132,7 +1241,7 @@ if (( SOURCE_IS_DIRECTORY == 0 )); then
   sudo rm -rf "$STAGE_DIR"
   sudo mkdir -p "$STAGE_DIR"
 
-  determine_stage_source "$SOURCE_ROOT"
+  determine_stage_source "$EXECUTABLE_HINT"
   sudo cp -a "$STAGE_SOURCE"/. "$STAGE_DIR"/
   WORK_ROOT="$STAGE_DIR"
 else
@@ -1207,7 +1316,7 @@ if [[ -n "${FINAL_ICON:-}" ]]; then
     ICON_EXT="${ICON_EXT,,}"
     USER_ICON_PATH="${LOCAL_ICON_DIR}/${APP_NAME,,}.${ICON_EXT}"
     sudo -u "$USER_NAME" mkdir -p "$LOCAL_ICON_DIR"
-    sudo -u "$USER_NAME" rm -f \
+    sudo -u "$USER_NAME" "$SYSTEM_RM" -f \
       "${LOCAL_ICON_DIR}/${APP_NAME,,}.png" \
       "${LOCAL_ICON_DIR}/${APP_NAME,,}.svg" \
       "${LOCAL_ICON_DIR}/${APP_NAME,,}.xpm" \
