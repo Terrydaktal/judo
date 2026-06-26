@@ -2,7 +2,7 @@
 
 `judo` installs self-contained Linux applications from archives, package payloads, URLs, or local directories.
 
-Current script version: `0.1.3`
+Current script version: `0.1.7`
 
 It extracts or inspects the input, picks the most likely main executable, and then either installs the app under `/opt/<AppName>` for archive inputs or keeps the source tree in place for directory inputs. In both cases it creates a user desktop launcher and a user command symlink in `~/.local/bin`.
 
@@ -36,7 +36,7 @@ it will:
 11. If you edit, you can choose an executable, desktop file, or icon by number or by absolute path.
 12. Reuse or generate a desktop file and set managed keys (`Name`, `Exec`, `Icon`, etc.).
 13. Create/update `~/.local/share/applications/<appname>.desktop` and `~/.local/bin/<appname>`.
-14. For `judo uninstall <AppName>`, remove the generated desktop file, launcher symlink, and any `~/.local/share/icons/judo/<appname>.*` icon. Remove `/opt/<AppName>` only when that install directory exists; leave source trees outside `/opt` in place.
+14. For `judo uninstall <AppName>`, remove the generated desktop file, launcher symlink, and any generated user `hicolor` icon for `<appname>`. Remove `/opt/<AppName>` only when that install directory exists; leave source trees outside `/opt` in place.
 
 Staging in `/opt/.<AppName>.staging.<pid>` is intentional for archive inputs:
 
@@ -73,10 +73,13 @@ Recommended:
 - `.zip`
 - `.deb` (payload extraction mode)
 - `.rpm` (payload extraction mode)
+- `.AppImage` (single-file executable mode with metadata extraction)
 
-You can pass either a local archive path or an `http://` / `https://` URL. URL inputs are downloaded first via `curl -L`, then installed.
+You can pass either a local archive/AppImage path or an `http://` / `https://` URL. URL inputs are downloaded first via `curl -L`, then installed.
 
 For package files (`.deb`, `.rpm`), `judo` extracts payload contents and installs from that tree. It does not run package-manager maintainer scripts or resolve dependencies.
+
+For AppImage files, `judo` stages the AppImage itself as the executable under `/opt/<AppName>/<appname>.AppImage` and runs `--appimage-extract` in a temporary directory to discover bundled desktop files and icons.
 
 ## Installation
 
@@ -108,6 +111,7 @@ judo ~/Downloads/krita-5.2.9-x86_64.appimage.zip Krita
 judo ~/Downloads/Slicer-linux-amd64.deb Slicer
 judo ~/Downloads/example.tar.zst Example
 judo ~/Downloads/example.rpm Example
+judo ~/Downloads/App.AppImage App
 judo ~/src/copyq copyq
 judo --force ~/Downloads/Telegram.tar.xz Telegram
 judo uninstall Telegram
@@ -120,7 +124,7 @@ Before installation work, `judo` checks for existing generated targets:
 - `/opt/<AppName>`
 - `~/.local/share/applications/<appname>.desktop`
 - `~/.local/bin/<appname>` (symlink or regular file)
-- `~/.local/share/icons/judo/<appname>.*`
+- `~/.local/share/icons/hicolor/{scalable,256x256}/apps/<appname>.*`
 
 If conflicts exist:
 
@@ -151,12 +155,13 @@ After the best executable is found:
 If a vendor `.desktop` file is found:
 
 - It is reused
-- These keys are replaced: `Version`, `Name`, `Exec`, `Icon`, `Terminal`, `Type`, `Categories`
+- Its `Name=` is preserved for the start menu label
+- These keys are replaced: `Version`, `Exec`, `Icon`, `Terminal`, `Type`, `Categories`
 - Other vendor keys are preserved (for example `StartupWMClass`, `MimeType`, `Actions`)
 
-If no usable vendor file exists, `judo` generates a minimal desktop entry.
+If no usable vendor file exists, `judo` generates a minimal desktop entry. In an interactive terminal, it asks whether to use a different start menu name; otherwise it falls back to the supplied `<AppName>`.
 
-`Exec` points to the selected executable. For archive inputs this is the executable under `/opt/<AppName>`; for directory inputs it is the executable inside the provided directory. When possible, vendor `Exec` suffix arguments/field codes are preserved.
+`Name` controls the start menu label. `Exec` points to the selected executable. For archive inputs this is the executable under `/opt/<AppName>`; for directory inputs it is the executable inside the provided directory. When possible, vendor `Exec` suffix arguments/field codes are preserved. The supplied `<AppName>` still controls the symlink name, desktop filename, install directory, and generated icon name.
 
 `judo` prints the desktop file candidates first, then the executable candidates, then the icon candidates. It auto-selects the best option in each section and then lets you confirm, edit, or cancel before it writes the final desktop file. If the selected desktop file has a usable `Icon=` entry, that icon is shown in the icon shortlist with the resolved path it came from.
 
@@ -167,7 +172,7 @@ If no usable vendor file exists, `judo` generates a minimal desktop entry.
 - `judo` prints the desktop file, executable, and icon candidates in that order, auto-selects the top choice for each, and then stops for a final confirm/edit/cancel prompt
 - In the edit step, you can override any of the three by number or by absolute path
 - If a selected desktop file contains a resolvable `Icon=` value, that icon appears in the icon shortlist as a desktop-file-derived candidate with its resolved absolute path
-- Archive input: copies the selected icon into `~/.local/share/icons/judo/<appname>.<ext>` and the desktop file uses that absolute path
+- Archive input: copies the selected icon into the user `hicolor` icon theme (`~/.local/share/icons/hicolor/scalable/apps/<appname>.svg` for SVG, or `~/.local/share/icons/hicolor/256x256/apps/<appname>.<ext>` for raster icons) and the desktop file uses `Icon=<appname>`
 - Directory input: the desktop file points to the icon where it already lives inside the source tree
 - Vendor `Icon=<name>` entries are only preserved when that icon name resolves in the installed icon themes or pixmap directories
 - If no icon is found, the desktop file falls back to `Icon=<AppName>`
@@ -182,7 +187,7 @@ For `judo app.tar.xz MyApp`:
 
 - Install: `/opt/MyApp`
 - Temp extract: `/tmp/MyApp-extract`
-- Icon copy: `~/.local/share/icons/judo/myapp.<ext>`
+- Icon copy: `~/.local/share/icons/hicolor/scalable/apps/myapp.svg` or `~/.local/share/icons/hicolor/256x256/apps/myapp.<ext>`
 - Desktop: `~/.local/share/applications/myapp.desktop`
 - Symlink: `~/.local/bin/myapp`
 - Backup (if replaced): `/opt/.MyApp.backup.YYYYMMDD-HHMMSS`

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-JUDO_VERSION="0.1.4"
+JUDO_VERSION="0.1.7"
 
 usage() {
   cat <<EOF
@@ -17,7 +17,7 @@ Arguments:
   <source-archive-directory-or-url>
               Archive path, directory path, or http(s) URL to install
               (.tar, .tar.gz/.tgz, .tar.bz2/.tbz2, .tar.xz/.txz, .tar.zst/.tzst,
-               .pkg.tar.zst, .zip, .deb, .rpm, or a folder containing a project or extracted archive)
+               .pkg.tar.zst, .zip, .deb, .rpm, .AppImage, or a folder containing a project or extracted archive)
   <AppName>   Logical application name used for naming paths and selecting an executable.
 
 Uninstall:
@@ -25,7 +25,7 @@ Uninstall:
               Deletes:
                 ~/.local/share/applications/<appname>.desktop
                 ~/.local/bin/<appname>
-                ~/.local/share/icons/judo/<appname>.*
+                ~/.local/share/icons/hicolor/{scalable,256x256}/apps/<appname>.*
               If /opt/<AppName> exists, it is removed too. If the executable points outside /opt,
               judo leaves the original source tree alone.
 
@@ -61,10 +61,13 @@ Install modes (copy source selection):
     ~/.local/bin symlink, both pointing at the executable inside the provided directory.
 
 Desktop file behavior:
-  If a vendor *.desktop file is found inside the archive, judo will reuse it but overwrite:
-    Version, Name, Exec, Icon, Terminal, Type, Categories
+  If a vendor *.desktop file is found inside the archive, judo will reuse its Name for the
+  start menu label but still use <AppName> for the generated symlink and install identity.
+  It overwrites:
+    Version, Exec, Icon, Terminal, Type, Categories
   All other vendor keys (e.g. StartupWMClass, MimeType, Actions) are preserved.
-  If no vendor desktop file is found, judo generates a minimal desktop file.
+  If no vendor desktop file is found, judo generates a minimal desktop file and lets an
+  interactive user choose a different start menu label.
 
 Re-run behavior:
   Safe to run multiple times. Archive runs:
@@ -80,7 +83,7 @@ Notes:
   - Ensure ~/.local/bin is on your PATH to run <appname> from the terminal.
   - If generated names already exist, judo asks whether to overwrite, use a new name, or cancel.
     Archive installs include /opt/<AppName>; all installs also check the desktop file,
-    ~/.local/bin symlink, and any generated icon under ~/.local/share/icons/judo/<appname>.*.
+    ~/.local/bin symlink, and any generated icon under ~/.local/share/icons/hicolor/.
   - If <source-archive-directory-or-url> starts with http:// or https://, judo downloads it using curl -L first.
   - If <source-archive-directory-or-url> is a directory, judo uses it directly as the source tree.
   - For .deb/.rpm input, judo extracts package payload only, then installs from that tree.
@@ -130,11 +133,13 @@ DOWNLOADED_ARCHIVE=""
 DEB_WORK_DIR=""
 SOURCE_ROOT=""
 SOURCE_IS_DIRECTORY=0
+SOURCE_IS_APPIMAGE=0
 
 USER_NAME="$(logname)"
 USER_HOME="$(eval echo "~${USER_NAME}")"
 LOCAL_BIN_DIR="${USER_HOME}/.local/bin"
-LOCAL_ICON_DIR="${USER_HOME}/.local/share/icons/judo"
+LOCAL_ICON_DIR="${USER_HOME}/.local/share/icons/hicolor"
+LEGACY_LOCAL_ICON_DIR="${USER_HOME}/.local/share/icons/judo"
 SYSTEM_RM="/bin/rm"
 
 COLOR_ENABLED=0
@@ -201,7 +206,59 @@ refresh_name_paths() {
   STAGE_DIR="/opt/.${APP_NAME}.staging.$$"
   BACKUP_DIR="/opt/.${APP_NAME}.backup.$(date +%Y%m%d-%H%M%S)"
   SYMLINK_PATH="${LOCAL_BIN_DIR}/${APP_NAME,,}"
-  USER_ICON_STEM="${LOCAL_ICON_DIR}/${APP_NAME,,}"
+  USER_ICON_NAME="${APP_NAME,,}"
+  LEGACY_USER_ICON_STEM="${LEGACY_LOCAL_ICON_DIR}/${USER_ICON_NAME}"
+}
+
+generated_icon_paths() {
+  local icon_ext
+
+  printf '%s\n' "${LOCAL_ICON_DIR}/scalable/apps/${USER_ICON_NAME}.svg"
+  for icon_ext in png xpm ico; do
+    printf '%s\n' "${LOCAL_ICON_DIR}/256x256/apps/${USER_ICON_NAME}.${icon_ext}"
+  done
+
+  for icon_ext in png svg xpm ico; do
+    printf '%s\n' "${LEGACY_USER_ICON_STEM}.${icon_ext}"
+  done
+}
+
+install_user_icon() {
+  local icon_path="$1"
+  local icon_ext="${icon_path##*.}"
+  local icon_dir
+  local user_icon_path
+  local old_icon_path
+
+  icon_ext="${icon_ext,,}"
+  case "$icon_ext" in
+    svg)
+      icon_dir="${LOCAL_ICON_DIR}/scalable/apps"
+      ;;
+    png|xpm|ico)
+      icon_dir="${LOCAL_ICON_DIR}/256x256/apps"
+      ;;
+    *)
+      icon_dir="${LOCAL_ICON_DIR}/256x256/apps"
+      icon_ext="png"
+      ;;
+  esac
+
+  user_icon_path="${icon_dir}/${USER_ICON_NAME}.${icon_ext}"
+  sudo -u "$USER_NAME" mkdir -p "${LOCAL_ICON_DIR}/scalable/apps" "${LOCAL_ICON_DIR}/256x256/apps"
+
+  while IFS= read -r old_icon_path; do
+    [[ -n "$old_icon_path" ]] || continue
+    sudo -u "$USER_NAME" "$SYSTEM_RM" -f "$old_icon_path"
+  done < <(generated_icon_paths)
+
+  sudo -u "$USER_NAME" install -m 644 "$icon_path" "$user_icon_path" >&2
+
+  if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    sudo -u "$USER_NAME" gtk-update-icon-cache -q -t -f "$LOCAL_ICON_DIR" 2>/dev/null || true
+  fi
+
+  printf '%s' "$USER_ICON_NAME"
 }
 
 resolve_uninstall_target() {
@@ -226,7 +283,7 @@ resolve_uninstall_target() {
 
 uninstall_app() {
   local target_path=""
-  local icon_ext
+  local icon_path
   local removed_any=0
 
   info_line "Uninstalling $APP_NAME..."
@@ -243,13 +300,13 @@ uninstall_app() {
     removed_any=1
   fi
 
-  for icon_ext in png svg xpm ico; do
-    if [[ -e "${USER_ICON_STEM}.${icon_ext}" ]]; then
-      info_line "Removing icon: ${USER_ICON_STEM}.${icon_ext}"
-      sudo -u "$USER_NAME" "$SYSTEM_RM" -f "${USER_ICON_STEM}.${icon_ext}"
+  while IFS= read -r icon_path; do
+    if [[ -e "$icon_path" ]]; then
+      info_line "Removing icon: $icon_path"
+      sudo -u "$USER_NAME" "$SYSTEM_RM" -f "$icon_path"
       removed_any=1
     fi
-  done
+  done < <(generated_icon_paths)
 
   target_path="$(resolve_uninstall_target)"
   if [[ -e "$INSTALL_DIR" ]]; then
@@ -274,7 +331,7 @@ uninstall_app() {
   success_line "=== UNINSTALL COMPLETE ==="
   printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Desktop file:" "$C_RESET" "$DESKTOP_FILE"
   printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Symlink:" "$C_RESET" "$SYMLINK_PATH"
-  printf '%b%s%b %s.*\n' "${C_BOLD}${C_GREEN}" "Icon stem:" "$C_RESET" "$USER_ICON_STEM"
+  printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Icon name:" "$C_RESET" "$USER_ICON_NAME"
   printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Install dir:" "$C_RESET" "$INSTALL_DIR"
 }
 
@@ -307,7 +364,7 @@ fi
 
 find_name_conflicts() {
   NAME_CONFLICTS=()
-  local icon_ext
+  local icon_path
 
   if (( SOURCE_IS_DIRECTORY == 0 )) && [[ -e "$INSTALL_DIR" ]]; then
     NAME_CONFLICTS+=("Install path exists: $INSTALL_DIR")
@@ -322,11 +379,11 @@ find_name_conflicts() {
       NAME_CONFLICTS+=("Local bin entry exists and is not a symlink: $SYMLINK_PATH")
     fi
   fi
-  for icon_ext in png svg xpm ico; do
-    if [[ -e "${USER_ICON_STEM}.${icon_ext}" ]]; then
-      NAME_CONFLICTS+=("User icon exists: ${USER_ICON_STEM}.${icon_ext}")
+  while IFS= read -r icon_path; do
+    if [[ -e "$icon_path" ]]; then
+      NAME_CONFLICTS+=("User icon exists: $icon_path")
     fi
-  done
+  done < <(generated_icon_paths)
 }
 
 validate_app_name() {
@@ -370,6 +427,7 @@ download_archive_if_url() {
     *.zip) suffix=".zip" ;;
     *.deb) suffix=".deb" ;;
     *.rpm) suffix=".rpm" ;;
+    *.appimage) suffix=".AppImage" ;;
   esac
 
   DOWNLOADED_ARCHIVE="$(mktemp "/tmp/judo-download.XXXXXX${suffix}")"
@@ -455,6 +513,28 @@ extract_rpm_payload() {
   exit 1
 }
 
+extract_appimage_metadata() {
+  local appimage_path="$1"
+  local extract_dir="$TEMP_DIR/appimage-metadata"
+  local runnable_appimage="$TEMP_DIR/source.AppImage"
+
+  mkdir -p "$extract_dir"
+  cp "$appimage_path" "$runnable_appimage"
+  chmod +x "$runnable_appimage"
+
+  if (
+    cd "$extract_dir"
+    "$runnable_appimage" --appimage-extract >/dev/null 2>&1
+  ); then
+    SOURCE_ROOT="$extract_dir/squashfs-root"
+    info_line "Extracted AppImage metadata to: $SOURCE_ROOT"
+    return
+  fi
+
+  warn_line "Could not extract AppImage metadata with --appimage-extract; desktop/icon candidates may be limited."
+  SOURCE_ROOT="$TEMP_DIR"
+}
+
 extract_archive() {
   local archive_path="$1"
   local archive_lc="${archive_path,,}"
@@ -499,6 +579,7 @@ archive_file_type_matches() {
     *.zip) [[ "$file_type" == *"Zip archive data"* ]] ;;
     *.deb) [[ "$file_type" == *"Debian binary package"* ]] ;;
     *.rpm) [[ "$file_type" == *"RPM"* ]] ;;
+    *.appimage) [[ "$file_type" == *"ELF"* || "$file_type" == *"AppImage"* || "$file_type" == *"executable"* ]] ;;
     *) return 0 ;;
   esac
 }
@@ -1106,6 +1187,32 @@ prompt_candidate_selection() {
   done
 }
 
+desktop_display_name() {
+  local desktop_file="$1"
+
+  if [[ -f "$desktop_file" ]]; then
+    grep -m1 '^Name=' "$desktop_file" 2>/dev/null | cut -d= -f2- || true
+  fi
+}
+
+prompt_generated_display_name() {
+  local default_name="$1"
+  local entered_name=""
+
+  if [[ ! -t 0 ]]; then
+    printf '%s' "$default_name"
+    return
+  fi
+
+  status_line "No desktop file selected; menu name defaults to '$default_name'. Enter a different menu name, or press enter to keep it." >&2
+  read -r -p "$(prompt_text '> ')" entered_name
+  if [[ -n "$entered_name" ]]; then
+    printf '%s' "$entered_name"
+  else
+    printf '%s' "$default_name"
+  fi
+}
+
 review_install_choices() {
   local -n exec_candidates="$1"
   local -n desktop_candidates="$2"
@@ -1167,7 +1274,7 @@ write_desktop_from_vendor() {
   # Writes a desktop file based on vendor file, but overwrites the keys judo manages.
   local vendor="$1"
   local out="$2"
-  local name="$3"
+  local display_name="$3"
   local exec_line="$4"      # full Exec value (no "Exec=" prefix)
   local icon_entry="$5"     # full "Icon=..." line
   local categories="$6"
@@ -1177,7 +1284,7 @@ write_desktop_from_vendor() {
     return 1
   fi
 
-  awk -v name="$name" \
+  awk -v display_name="$display_name" \
       -v exec_line="$exec_line" \
       -v icon_entry="$icon_entry" \
       -v categories="$categories" '
@@ -1185,7 +1292,7 @@ write_desktop_from_vendor() {
     /^\[Desktop Entry\]$/ {
       print
       print "Version=1.0"
-      print "Name=" name
+      print "Name=" display_name
       print "Exec=" exec_line
       print icon_entry
       print "Terminal=false"
@@ -1222,8 +1329,22 @@ fi
 resolve_name_conflicts
 download_archive_if_url "$SOURCE_INPUT"
 
+ARCHIVE_LC="${ARCHIVE,,}"
+if (( SOURCE_IS_DIRECTORY == 0 )) && [[ "$ARCHIVE_LC" == *.appimage ]]; then
+  SOURCE_IS_APPIMAGE=1
+fi
+
 if (( SOURCE_IS_DIRECTORY == 1 )); then
   info_line "Using directory source tree: $SOURCE_ROOT"
+elif (( SOURCE_IS_APPIMAGE == 1 )); then
+  info_line "Preparing temporary AppImage metadata dir..."
+  "$SYSTEM_RM" -rf "$TEMP_DIR"
+  mkdir -p "$TEMP_DIR"
+
+  preflight_archive_type "$ARCHIVE"
+
+  info_line "Extracting AppImage metadata..."
+  extract_appimage_metadata "$ARCHIVE"
 else
   info_line "Preparing temporary extraction dir..."
   "$SYSTEM_RM" -rf "$TEMP_DIR"
@@ -1236,20 +1357,35 @@ else
   SOURCE_ROOT="$TEMP_DIR"
 fi
 
-status_line "Looking for executable..."
-EXECUTABLE_HINT="$(pick_best_executable "$SOURCE_ROOT")"
-if [[ -z "$EXECUTABLE_HINT" ]]; then
-  if looks_like_windows_bundle "$SOURCE_ROOT"; then
-    error_line "This archive looks like a Windows-only bundle (for example .exe/.dll files) and does not contain a native Linux executable."
-    error_line "Use a Linux release, AppImage, or source archive instead."
-  else
-    error_line "No executable found"
+if (( SOURCE_IS_APPIMAGE == 1 )); then
+  status_line "Using AppImage as executable..."
+  EXECUTABLE_HINT="$ARCHIVE"
+  success_line "Found executable: $EXECUTABLE_HINT"
+else
+  status_line "Looking for executable..."
+  EXECUTABLE_HINT="$(pick_best_executable "$SOURCE_ROOT")"
+  if [[ -z "$EXECUTABLE_HINT" ]]; then
+    if looks_like_windows_bundle "$SOURCE_ROOT"; then
+      error_line "This archive looks like a Windows-only bundle (for example .exe/.dll files) and does not contain a native Linux executable."
+      error_line "Use a Linux release, AppImage, or source archive instead."
+    else
+      error_line "No executable found"
+    fi
+    exit 1
   fi
-  exit 1
+  success_line "Found executable: $EXECUTABLE_HINT"
 fi
-success_line "Found executable: $EXECUTABLE_HINT"
 
-if (( SOURCE_IS_DIRECTORY == 0 )); then
+if (( SOURCE_IS_APPIMAGE == 1 )); then
+  info_line "Staging AppImage in: $STAGE_DIR"
+  sudo rm -rf "$STAGE_DIR"
+  sudo mkdir -p "$STAGE_DIR"
+  APPIMAGE_STAGE_PATH="$STAGE_DIR/${APP_NAME,,}.AppImage"
+  sudo install -m 755 "$ARCHIVE" "$APPIMAGE_STAGE_PATH"
+  WORK_ROOT="$STAGE_DIR"
+  REVIEW_ROOT="$SOURCE_ROOT"
+  EXECUTABLE_HINT="$APPIMAGE_STAGE_PATH"
+elif (( SOURCE_IS_DIRECTORY == 0 )); then
   info_line "Staging install in: $STAGE_DIR"
   sudo rm -rf "$STAGE_DIR"
   sudo mkdir -p "$STAGE_DIR"
@@ -1257,13 +1393,15 @@ if (( SOURCE_IS_DIRECTORY == 0 )); then
   determine_stage_source "$EXECUTABLE_HINT"
   sudo cp -a "$STAGE_SOURCE"/. "$STAGE_DIR"/
   WORK_ROOT="$STAGE_DIR"
+  REVIEW_ROOT="$WORK_ROOT"
 else
   info_line "Keeping source tree in place; skipping /opt staging..."
   WORK_ROOT="$SOURCE_ROOT"
+  REVIEW_ROOT="$WORK_ROOT"
 fi
 
 collect_top_candidates 10 "$WORK_ROOT" exec EXEC_CANDIDATES
-collect_top_candidates 10 "$WORK_ROOT" desktop DESKTOP_CANDIDATES
+collect_top_candidates 10 "$REVIEW_ROOT" desktop DESKTOP_CANDIDATES
 
 SELECTED_EXECUTABLE="$EXECUTABLE_HINT"
 if (( ${#EXEC_CANDIDATES[@]} > 0 )); then
@@ -1277,7 +1415,7 @@ fi
 
 SELECTED_ICON=""
 
-review_install_choices EXEC_CANDIDATES DESKTOP_CANDIDATES "$WORK_ROOT" SELECTED_EXECUTABLE SELECTED_DESKTOP_FILE SELECTED_ICON
+review_install_choices EXEC_CANDIDATES DESKTOP_CANDIDATES "$REVIEW_ROOT" SELECTED_EXECUTABLE SELECTED_DESKTOP_FILE SELECTED_ICON
 
 if (( SOURCE_IS_DIRECTORY == 0 )); then
   info_line "Replacing install directory under /opt..."
@@ -1290,6 +1428,11 @@ if (( SOURCE_IS_DIRECTORY == 0 )); then
   FINAL_ROOT="$INSTALL_DIR"
 else
   FINAL_ROOT="$SOURCE_ROOT"
+fi
+
+REVIEW_FINAL_ROOT="$FINAL_ROOT"
+if (( SOURCE_IS_APPIMAGE == 1 )); then
+  REVIEW_FINAL_ROOT="$REVIEW_ROOT"
 fi
 
 resolve_selected_path() {
@@ -1310,8 +1453,15 @@ resolve_selected_path() {
 }
 
 FINAL_EXECUTABLE="$(resolve_selected_path "$SELECTED_EXECUTABLE" "$WORK_ROOT" "$FINAL_ROOT")"
-FINAL_DESKTOP_VENDOR="$(resolve_selected_path "$SELECTED_DESKTOP_FILE" "$WORK_ROOT" "$FINAL_ROOT")"
-FINAL_ICON="$(resolve_selected_path "$SELECTED_ICON" "$WORK_ROOT" "$FINAL_ROOT")"
+FINAL_DESKTOP_VENDOR="$(resolve_selected_path "$SELECTED_DESKTOP_FILE" "$REVIEW_ROOT" "$REVIEW_FINAL_ROOT")"
+FINAL_ICON="$(resolve_selected_path "$SELECTED_ICON" "$REVIEW_ROOT" "$REVIEW_FINAL_ROOT")"
+DISPLAY_NAME="$APP_NAME"
+if [[ -n "${FINAL_DESKTOP_VENDOR:-}" && -f "$FINAL_DESKTOP_VENDOR" ]]; then
+  VENDOR_DISPLAY_NAME="$(desktop_display_name "$FINAL_DESKTOP_VENDOR")"
+  [[ -n "$VENDOR_DISPLAY_NAME" ]] && DISPLAY_NAME="$VENDOR_DISPLAY_NAME"
+else
+  DISPLAY_NAME="$(prompt_generated_display_name "$APP_NAME")"
+fi
 
 if [[ -n "$FINAL_EXECUTABLE" && "$SOURCE_IS_DIRECTORY" -eq 0 && "$FINAL_EXECUTABLE" == "$FINAL_ROOT"/* ]]; then
   sudo chmod +x "$FINAL_EXECUTABLE" 2>/dev/null || true
@@ -1325,17 +1475,7 @@ ICON_ENTRY="Icon=$APP_NAME"
 
 if [[ -n "${FINAL_ICON:-}" ]]; then
   if [[ -f "$FINAL_ICON" ]] && (( SOURCE_IS_DIRECTORY == 0 )); then
-    ICON_EXT="${FINAL_ICON##*.}"
-    ICON_EXT="${ICON_EXT,,}"
-    USER_ICON_PATH="${LOCAL_ICON_DIR}/${APP_NAME,,}.${ICON_EXT}"
-    sudo -u "$USER_NAME" mkdir -p "$LOCAL_ICON_DIR"
-    sudo -u "$USER_NAME" "$SYSTEM_RM" -f \
-      "${LOCAL_ICON_DIR}/${APP_NAME,,}.png" \
-      "${LOCAL_ICON_DIR}/${APP_NAME,,}.svg" \
-      "${LOCAL_ICON_DIR}/${APP_NAME,,}.xpm" \
-      "${LOCAL_ICON_DIR}/${APP_NAME,,}.ico"
-    sudo -u "$USER_NAME" install -m 644 "$FINAL_ICON" "$USER_ICON_PATH"
-    ICON_ENTRY="Icon=$USER_ICON_PATH"
+    ICON_ENTRY="Icon=$(install_user_icon "$FINAL_ICON")"
   else
     ICON_ENTRY="Icon=$FINAL_ICON"
   fi
@@ -1363,14 +1503,14 @@ if [[ -n "${FINAL_DESKTOP_VENDOR:-}" && -f "$FINAL_DESKTOP_VENDOR" ]]; then
     fi
   fi
 
-  if write_desktop_from_vendor "$FINAL_DESKTOP_VENDOR" "$TMP_DESKTOP" "$APP_NAME" "$EXEC_LINE" "$ICON_ENTRY" "$DESKTOP_CATEGORIES"; then
+  if write_desktop_from_vendor "$FINAL_DESKTOP_VENDOR" "$TMP_DESKTOP" "$DISPLAY_NAME" "$EXEC_LINE" "$ICON_ENTRY" "$DESKTOP_CATEGORIES"; then
     sudo -u "$USER_NAME" install -m 644 "$TMP_DESKTOP" "$DESKTOP_FILE"
   else
     warn_line "Vendor desktop file unusable; falling back to generated desktop file."
     sudo -u "$USER_NAME" cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Version=1.0
-Name=$APP_NAME
+Name=$DISPLAY_NAME
 Exec=$FINAL_EXECUTABLE
 $ICON_ENTRY
 Terminal=false
@@ -1382,7 +1522,7 @@ else
   sudo -u "$USER_NAME" cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Version=1.0
-Name=$APP_NAME
+Name=$DISPLAY_NAME
 Exec=$FINAL_EXECUTABLE
 $ICON_ENTRY
 Terminal=false
