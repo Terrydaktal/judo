@@ -577,6 +577,17 @@ score_executable() {
   printf '%s\n' "$score"
 }
 
+is_executable_candidate() {
+  local exec_path="$1"
+  local filename_lc
+
+  filename_lc="$(basename "$exec_path")"
+  filename_lc="${filename_lc,,}"
+
+  # .desktop files can have the executable bit, but they are launcher metadata.
+  [[ "$filename_lc" != *.desktop ]]
+}
+
 pick_best_executable() {
   local root="$1"
   local best_score=-999999
@@ -584,6 +595,7 @@ pick_best_executable() {
   local score=0
 
   while IFS= read -r -d '' exec; do
+    is_executable_candidate "$exec" || continue
     score="$(score_executable "$exec")"
     if (( score > best_score )); then
       best_score="$score"
@@ -896,6 +908,7 @@ list_executable_candidates() {
   local score
 
   while IFS= read -r -d '' exec; do
+    is_executable_candidate "$exec" || continue
     score="$(score_executable "$exec")"
     printf '%s\t%s\t%s\n' "$score" "$exec" "$exec"
   done < <(find "$root" -type f -executable -print0 2>/dev/null | sort -z)

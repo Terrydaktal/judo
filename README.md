@@ -137,7 +137,7 @@ If conflicts exist:
 - Non-hidden paths
 - Paths under `bin/` or `app/`
 
-It de-prioritizes likely helper binaries (`test`, `debug`, `helper`, `daemon`).
+It de-prioritizes likely helper binaries (`test`, `debug`, `helper`, `daemon`). Executable `.desktop` files are excluded from executable selection and shown only as desktop file candidates.
 
 ## Source Modes
 
