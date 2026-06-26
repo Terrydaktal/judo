@@ -2,7 +2,7 @@
 
 `judo` installs self-contained Linux applications from archives, package payloads, URLs, or local directories.
 
-Current script version: `0.1.7`
+Current script version: `0.1.8`
 
 It extracts or inspects the input, picks the most likely main executable, and then either installs the app under `/opt/<AppName>` for archive inputs or keeps the source tree in place for directory inputs. In both cases it creates a user desktop launcher and a user command symlink in `~/.local/bin`.
 
@@ -36,7 +36,8 @@ it will:
 11. If you edit, you can choose an executable, desktop file, or icon by number or by absolute path.
 12. Reuse or generate a desktop file and set managed keys (`Name`, `Exec`, `Icon`, etc.).
 13. Create/update `~/.local/share/applications/<appname>.desktop` and `~/.local/bin/<appname>`.
-14. For `judo uninstall <AppName>`, remove the generated desktop file, launcher symlink, and any generated user `hicolor` icon for `<appname>`. Remove `/opt/<AppName>` only when that install directory exists; leave source trees outside `/opt` in place.
+14. Warn if Latte Dock or Plasma config still references an old temporary `/tmp/*.desktop` launcher for the same app, because that stale pinned launcher can survive reinstalling the app.
+15. For `judo uninstall <AppName>`, remove the generated desktop file, launcher symlink, and any generated user `hicolor` icon for `<appname>`. Remove `/opt/<AppName>` only when that install directory exists; leave source trees outside `/opt` in place.
 
 Staging in `/opt/.<AppName>.staging.<pid>` is intentional for archive inputs:
 
@@ -210,6 +211,14 @@ For `judo ~/src/MyApp MyApp`:
   - `judo` prints the detected archive type before extraction. If it doesn't match the filename suffix, `judo` stops early and tells you the file is mislabeled or the wrong release artifact.
 - App launches from terminal but not desktop
   - Inspect desktop file under `~/.local/share/applications/`.
+- Latte Dock or the normal Plasma taskbar still opens an old `/tmp/*.desktop` path
+  - judo scans Latte/Plasma config after install and warns if it finds a stale temporary desktop-file reference for the same app.
+  - judo does not rewrite Latte layouts automatically because those config files are user/session-specific and easy to corrupt.
+  - If the stale reference is in Latte config and Latte Dock is installed and running in the current local graphical session, judo restarts Latte Dock automatically.
+  - If the stale reference is in Plasma taskbar config and Plasma Shell is installed and running in the current local graphical session, judo restarts Plasma Shell automatically.
+  - judo does not restart both shells on every install; it only restarts the affected shell after detecting a stale temporary desktop-file reference.
+  - If judo is being run over SSH or without a graphical session environment, it only reports the stale reference; it does not try to refresh or restart the remote graphical session.
+  - If the old launcher still remains after the restart, unpin it, launch the app from the menu entry backed by `~/.local/share/applications/<appname>.desktop`, and pin that new entry.
 - Command not found after install
   - Ensure `~/.local/bin` is in `PATH` and open a new shell.
 

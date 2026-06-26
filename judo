@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-JUDO_VERSION="0.1.7"
+JUDO_VERSION="0.1.8"
 
 usage() {
   cat <<EOF
@@ -208,6 +208,197 @@ refresh_name_paths() {
   SYMLINK_PATH="${LOCAL_BIN_DIR}/${APP_NAME,,}"
   USER_ICON_NAME="${APP_NAME,,}"
   LEGACY_USER_ICON_STEM="${LEGACY_LOCAL_ICON_DIR}/${USER_ICON_NAME}"
+}
+
+add_unique_path() {
+  local new_path="$1"
+  local existing_path
+
+  [[ -n "$new_path" && -e "$new_path" ]] || return
+  for existing_path in "${UNIQUE_PATHS[@]:-}"; do
+    [[ "$existing_path" == "$new_path" ]] && return
+  done
+  UNIQUE_PATHS+=("$new_path")
+}
+
+is_ssh_session() {
+  [[ -n "${SSH_CONNECTION:-}" || -n "${SSH_CLIENT:-}" || -n "${SSH_TTY:-}" ]]
+}
+
+has_graphical_session_env() {
+  [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" || -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]
+}
+
+restart_latte_dock_if_safe() {
+  local stopped=0
+
+  if ! command -v latte-dock >/dev/null 2>&1; then
+    warn_line "latte-dock is not on PATH, so judo cannot restart it automatically."
+    return
+  fi
+
+  if ! pgrep -u "$USER_NAME" -x latte-dock >/dev/null 2>&1; then
+    warn_line "Latte Dock is not currently running, so there is nothing to restart."
+    return
+  fi
+
+  info_line "Restarting Latte Dock to clear stale launcher state..."
+
+  if command -v kquitapp6 >/dev/null 2>&1; then
+    kquitapp6 latte-dock >/dev/null 2>&1 && stopped=1 || true
+  elif command -v kquitapp5 >/dev/null 2>&1; then
+    kquitapp5 latte-dock >/dev/null 2>&1 && stopped=1 || true
+  fi
+
+  sleep 1
+  if pgrep -u "$USER_NAME" -x latte-dock >/dev/null 2>&1; then
+    pkill -TERM -u "$USER_NAME" -x latte-dock >/dev/null 2>&1 && stopped=1 || true
+    sleep 1
+  fi
+
+  if pgrep -u "$USER_NAME" -x latte-dock >/dev/null 2>&1; then
+    warn_line "Latte Dock did not stop cleanly; not forcing it further."
+    warn_line "Restart Latte Dock manually from the graphical session if the old launcher path remains cached."
+    return
+  fi
+
+  if (( stopped == 1 )); then
+    nohup latte-dock >/dev/null 2>&1 &
+    disown "$!" 2>/dev/null || true
+    success_line "Latte Dock restarted."
+  fi
+}
+
+restart_plasmashell_if_safe() {
+  local stopped=0
+
+  if ! command -v plasmashell >/dev/null 2>&1; then
+    warn_line "plasmashell is not on PATH, so judo cannot restart the normal Plasma taskbar automatically."
+    return
+  fi
+
+  if ! pgrep -u "$USER_NAME" -x plasmashell >/dev/null 2>&1; then
+    warn_line "Plasma Shell is not currently running, so there is no normal Plasma taskbar to restart."
+    return
+  fi
+
+  info_line "Restarting Plasma Shell to clear stale taskbar launcher state..."
+
+  if command -v kquitapp6 >/dev/null 2>&1; then
+    kquitapp6 plasmashell >/dev/null 2>&1 && stopped=1 || true
+  elif command -v kquitapp5 >/dev/null 2>&1; then
+    kquitapp5 plasmashell >/dev/null 2>&1 && stopped=1 || true
+  fi
+
+  sleep 1
+  if pgrep -u "$USER_NAME" -x plasmashell >/dev/null 2>&1; then
+    pkill -TERM -u "$USER_NAME" -x plasmashell >/dev/null 2>&1 && stopped=1 || true
+    sleep 1
+  fi
+
+  if pgrep -u "$USER_NAME" -x plasmashell >/dev/null 2>&1; then
+    warn_line "Plasma Shell did not stop cleanly; not forcing it further."
+    warn_line "Restart Plasma Shell manually from the graphical session if the old taskbar launcher path remains cached."
+    return
+  fi
+
+  if (( stopped == 1 )); then
+    if command -v kstart6 >/dev/null 2>&1; then
+      kstart6 plasmashell >/dev/null 2>&1 &
+    elif command -v kstart5 >/dev/null 2>&1; then
+      kstart5 plasmashell >/dev/null 2>&1 &
+    elif command -v kstart >/dev/null 2>&1; then
+      kstart plasmashell >/dev/null 2>&1 &
+    else
+      nohup plasmashell >/dev/null 2>&1 &
+    fi
+    disown "$!" 2>/dev/null || true
+    success_line "Plasma Shell restarted."
+  fi
+}
+
+refresh_stale_desktop_shells() {
+  local needs_latte="$1"
+  local needs_plasma="$2"
+
+  if is_ssh_session; then
+    warn_line "This appears to be an SSH session, so judo is only reporting the stale launcher reference and will not try to refresh Latte/Plasma."
+    warn_line "Fix it from the graphical session if the stale launcher remains cached."
+    return
+  fi
+
+  if ! has_graphical_session_env; then
+    warn_line "No local graphical session environment was detected, so judo will not try to restart Latte Dock or Plasma Shell."
+    warn_line "Restart the affected shell from the graphical session if the old launcher path remains cached."
+    return
+  fi
+
+  if (( needs_latte == 1 )); then
+    restart_latte_dock_if_safe
+  fi
+  if (( needs_plasma == 1 )); then
+    restart_plasmashell_if_safe
+  fi
+}
+
+warn_stale_dock_launchers() {
+  local config_dir="${USER_HOME}/.config"
+  local latte_dir="${config_dir}/latte"
+  local plasma_applets="${config_dir}/plasma-org.kde.plasma.desktop-appletsrc"
+  local app_lower="${APP_NAME,,}"
+  local desktop_lower
+  local path
+  local line
+  local stale_latte=0
+  local stale_plasma=0
+  local -a UNIQUE_PATHS=()
+  local -a matches=()
+
+  desktop_lower="$(basename "$DESKTOP_FILE")"
+
+  [[ -d "$latte_dir" || -f "$plasma_applets" || -f "${config_dir}/latte-dockrc" ]] || return
+
+  add_unique_path "$plasma_applets"
+  add_unique_path "${config_dir}/latte-dockrc"
+  add_unique_path "${config_dir}/plasmashellrc"
+
+  if [[ -d "$latte_dir" ]]; then
+    while IFS= read -r -d '' path; do
+      add_unique_path "$path"
+    done < <(find "$latte_dir" -maxdepth 4 -type f -print0 2>/dev/null || true)
+  fi
+
+  for path in "${UNIQUE_PATHS[@]}"; do
+    [[ -r "$path" ]] || continue
+    while IFS= read -r line; do
+      matches+=("${path}:${line}")
+      if [[ "$path" == "$latte_dir"/* || "$path" == "${config_dir}/latte-dockrc" ]]; then
+        stale_latte=1
+      fi
+      if [[ "$path" == "$plasma_applets" || "$path" == "${config_dir}/plasmashellrc" ]]; then
+        stale_plasma=1
+      fi
+    done < <(
+      awk -v app="$app_lower" -v desktop="$desktop_lower" '
+        {
+          lowered=tolower($0)
+          if (index(lowered, "/tmp/") && index(lowered, ".desktop") && (index(lowered, app) || index(lowered, desktop))) {
+            print FNR ":" $0
+          }
+        }
+      ' "$path" 2>/dev/null || true
+    )
+  done
+
+  (( ${#matches[@]} > 0 )) || return
+
+  warn_line "Potential stale Latte/Plasma launcher reference detected:"
+  for line in "${matches[@]}"; do
+    printf '  %s\n' "$line"
+  done
+  warn_line "Those entries still point at a temporary desktop file. judo wrote the stable desktop file here:"
+  printf '  %s\n' "$DESKTOP_FILE"
+  refresh_stale_desktop_shells "$stale_latte" "$stale_plasma"
 }
 
 generated_icon_paths() {
@@ -1543,3 +1734,4 @@ if (( SOURCE_IS_DIRECTORY == 0 )); then
   printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Backup (if any):" "$C_RESET" "$BACKUP_DIR"
 fi
 printf '%b%s%b %s\n' "${C_BOLD}${C_GREEN}" "Test command:" "$C_RESET" "${APP_NAME,,}"
+warn_stale_dock_launchers
