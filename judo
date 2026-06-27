@@ -588,12 +588,71 @@ is_http_archive_url() {
   [[ "$1" =~ ^https?:// ]]
 }
 
-download_archive_if_url() {
+archive_suffix_from_url() {
   local input="$1"
-  local suffix=".tar"
   local no_fragment
   local no_query
   local input_lc
+
+  no_fragment="${input%%#*}"
+  no_query="${no_fragment%%\?*}"
+  input_lc="${no_query,,}"
+
+  case "$input_lc" in
+    *.pkg.tar.zst) printf '%s' ".pkg.tar.zst" ;;
+    *.tar.gz|*.tgz) printf '%s' ".tar.gz" ;;
+    *.tar.bz2|*.tbz2) printf '%s' ".tar.bz2" ;;
+    *.tar.xz|*.txz) printf '%s' ".tar.xz" ;;
+    *.tar.zst|*.tzst) printf '%s' ".tar.zst" ;;
+    *.tar) printf '%s' ".tar" ;;
+    *.zip) printf '%s' ".zip" ;;
+    *.deb) printf '%s' ".deb" ;;
+    *.rpm) printf '%s' ".rpm" ;;
+    *.appimage) printf '%s' ".AppImage" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+looks_like_appimage_file() {
+  local path="$1"
+  local file_type="$2"
+
+  [[ "$file_type" == *"AppImage"* ]] && return 0
+  [[ "$file_type" == *"ELF"* || "$file_type" == *"executable"* ]] || return 1
+  grep -a -m 1 -q "AppImage" "$path" 2>/dev/null
+}
+
+archive_suffix_from_file_type() {
+  local path="$1"
+  local file_type="$2"
+  local hint_suffix="$3"
+
+  if looks_like_appimage_file "$path" "$file_type"; then
+    printf '%s' ".AppImage"
+    return
+  fi
+
+  case "$file_type" in
+    *"Debian binary package"*) printf '%s' ".deb" ;;
+    *"RPM"*) printf '%s' ".rpm" ;;
+    *"Zip archive data"*) printf '%s' ".zip" ;;
+    *"POSIX tar archive"*|*"tar archive"*) printf '%s' ".tar" ;;
+    *"gzip compressed data"*) printf '%s' ".tar.gz" ;;
+    *"bzip2 compressed data"*) printf '%s' ".tar.bz2" ;;
+    *"XZ compressed data"*) printf '%s' ".tar.xz" ;;
+    *"Zstandard compressed data"*) printf '%s' ".tar.zst" ;;
+    *)
+      printf '%s' "$hint_suffix"
+      ;;
+  esac
+}
+
+download_archive_if_url() {
+  local input="$1"
+  local hint_suffix
+  local detected_suffix
+  local file_type
+  local normalized_download
 
   if ! is_http_archive_url "$input"; then
     return
@@ -604,26 +663,23 @@ download_archive_if_url() {
     exit 1
   fi
 
-  no_fragment="${input%%#*}"
-  no_query="${no_fragment%%\?*}"
-  input_lc="${no_query,,}"
-
-  case "$input_lc" in
-    *.tar.gz|*.tgz) suffix=".tar.gz" ;;
-    *.tar.bz2|*.tbz2) suffix=".tar.bz2" ;;
-    *.tar.xz|*.txz) suffix=".tar.xz" ;;
-    *.tar.zst|*.tzst) suffix=".tar.zst" ;;
-    *.pkg.tar.zst) suffix=".pkg.tar.zst" ;;
-    *.tar) suffix=".tar" ;;
-    *.zip) suffix=".zip" ;;
-    *.deb) suffix=".deb" ;;
-    *.rpm) suffix=".rpm" ;;
-    *.appimage) suffix=".AppImage" ;;
-  esac
-
-  DOWNLOADED_ARCHIVE="$(mktemp "/tmp/judo-download.XXXXXX${suffix}")"
+  hint_suffix="$(archive_suffix_from_url "$input")"
+  DOWNLOADED_ARCHIVE="$(mktemp "/tmp/judo-download.XXXXXX")"
   info_line "Downloading archive from URL: $input"
   curl -fL "$input" -o "$DOWNLOADED_ARCHIVE"
+
+  file_type="$(describe_archive_file_type "$DOWNLOADED_ARCHIVE")"
+  info_line "Downloaded file type: $file_type"
+  detected_suffix="$(archive_suffix_from_file_type "$DOWNLOADED_ARCHIVE" "$file_type" "$hint_suffix")"
+  if [[ -z "$detected_suffix" ]]; then
+    error_line "Could not detect downloaded file type and URL has no supported archive suffix."
+    error_line "Use a direct URL ending in a supported suffix or download and rename the file manually."
+    exit 1
+  fi
+
+  normalized_download="${DOWNLOADED_ARCHIVE}${detected_suffix}"
+  mv "$DOWNLOADED_ARCHIVE" "$normalized_download"
+  DOWNLOADED_ARCHIVE="$normalized_download"
   ARCHIVE="$DOWNLOADED_ARCHIVE"
   success_line "Downloaded archive: $ARCHIVE"
 }

@@ -76,7 +76,7 @@ Recommended:
 - `.rpm` (payload extraction mode)
 - `.AppImage` (single-file executable mode with metadata extraction)
 
-You can pass either a local archive/AppImage path or an `http://` / `https://` URL. URL inputs are downloaded first via `curl -L`, then installed.
+You can pass either a local archive/AppImage path or an `http://` / `https://` URL. URL inputs are downloaded first via `curl -L`, inspected with `file`, normalized to the detected archive/package/AppImage type, then installed. This allows opaque URLs such as `/download?id=linux-latest` when the downloaded content is a supported type.
 
 For package files (`.deb`, `.rpm`), `judo` extracts payload contents and installs from that tree. It does not run package-manager maintainer scripts or resolve dependencies.
 
@@ -113,6 +113,10 @@ judo ~/Downloads/Slicer-linux-amd64.deb Slicer
 judo ~/Downloads/example.tar.zst Example
 judo ~/Downloads/example.rpm Example
 judo ~/Downloads/App.AppImage App
+judo https://example.com/downloads/App.AppImage App
+judo https://example.com/downloads/package.deb PackageApp
+judo "https://example.com/download?id=linux-latest" LatestApp
+judo "https://github.com/example/project/releases/latest/download/App.AppImage" App
 judo ~/src/copyq copyq
 judo --force ~/Downloads/Telegram.tar.xz Telegram
 judo uninstall Telegram
